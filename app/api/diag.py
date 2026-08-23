@@ -13,6 +13,7 @@ app long-term.
 from __future__ import annotations
 
 import os
+import xmlrpc.client
 
 from fastapi import APIRouter, HTTPException
 
@@ -20,6 +21,27 @@ from app.config import get_settings
 from app.etl import odoo_client
 
 router = APIRouter()
+
+
+@router.get("/api/_diag/odoo-dblist")
+def diag_odoo_dblist(secret: str):
+    """
+    Asks the Odoo server what databases it actually has, via the unauthenticated
+    db.list() XML-RPC method — no login needed, just a way to stop guessing the
+    database name. Some Odoo SaaS instances disable this for security; if so,
+    this will return the RPC error explaining that instead.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    try:
+        db_service = xmlrpc.client.ServerProxy(f"{settings.odoo_url}/xmlrpc/2/db")
+        databases = db_service.list()
+        return {"ok": True, "databases": databases}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
 
 
 @router.get("/api/_diag/odoo")
