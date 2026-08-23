@@ -19,8 +19,33 @@ from fastapi import APIRouter, HTTPException
 
 from app.config import get_settings
 from app.etl import odoo_client
+from app.etl.odoo_client import _authenticate, _execute_kw
 
 router = APIRouter()
+
+
+@router.get("/api/_diag/odoo-fields")
+def diag_odoo_fields(secret: str, model: str = "account.analytic.line", search: str = ""):
+    """
+    Lists field names (and types) on the given model, so I can stop guessing
+    field names one deploy at a time. Optional `search` filters to field
+    names containing that substring (case-insensitive).
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    try:
+        uid = _authenticate(settings)
+        fields = _execute_kw(
+            settings, uid, model, "fields_get", [], {"attributes": ["string", "type", "relation"]}
+        )
+        if search:
+            fields = {k: v for k, v in fields.items() if search.lower() in k.lower()}
+        return {"ok": True, "field_count": len(fields), "fields": fields}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
 
 
 @router.get("/api/_diag/odoo-dblist")
