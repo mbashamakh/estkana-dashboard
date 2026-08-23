@@ -18,10 +18,31 @@ import xmlrpc.client
 from fastapi import APIRouter, HTTPException
 
 from app.config import get_settings
+from app.db.session import SessionLocal
 from app.etl import odoo_client
 from app.etl.odoo_client import _authenticate, _execute_kw
+from app.etl.run_odoo_sync import sync_odoo
 
 router = APIRouter()
+
+
+@router.get("/api/_diag/sync-now")
+def diag_sync_now(secret: str):
+    """One-off manual trigger for the real sync, ahead of the hourly cron job existing."""
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    db = SessionLocal()
+    try:
+        rev, cogs, opex = odoo_client.fetch_records(settings)
+        result = sync_odoo(db, rev, cogs, opex)
+        return {"ok": True, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
 
 
 @router.get("/api/_diag/odoo-fields")
