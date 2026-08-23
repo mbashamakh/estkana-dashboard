@@ -29,6 +29,7 @@ def diag_odoo(secret: str):
         raise HTTPException(status_code=404)
 
     settings = get_settings()
+    print(f"DIAG_ODOO_HIT odoo_db={settings.odoo_db!r} odoo_url={settings.odoo_url!r}", flush=True)
     config_seen = {
         "odoo_url": settings.odoo_url,
         "odoo_db": settings.odoo_db,
