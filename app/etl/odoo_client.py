@@ -97,6 +97,7 @@ def _pull_group(settings: Settings, uid: int, code_prefix: str, date_from: str =
     domain = [
         ("general_account_id.code", "=like", f"{code_prefix}%"),
         ("date", ">=", date_from),
+        ("parent_state", "=", "posted"),
     ]
     groups = _execute_kw(
         settings, uid, "account.analytic.line", "read_group",
