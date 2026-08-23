@@ -29,10 +29,15 @@ def diag_odoo(secret: str):
         raise HTTPException(status_code=404)
 
     settings = get_settings()
+    config_seen = {
+        "odoo_url": settings.odoo_url,
+        "odoo_db": settings.odoo_db,
+        "odoo_username": settings.odoo_username,
+    }
     try:
         rev, cogs, opex = odoo_client.fetch_records(settings)
     except Exception as exc:  # noqa: BLE001 -- surfacing the raw error is the point of this endpoint
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": str(exc), "config_seen": config_seen}
 
     arbeen_jan = next(
         (r["v"] for r in rev if "ARBEEN" in r["n"] and r["m"] == "January 2026"), None
