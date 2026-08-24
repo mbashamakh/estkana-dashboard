@@ -9,15 +9,18 @@ enough for an hourly cron job:
    posts a bit late doesn't get missed) and upsert those days. This is what
    keeps "today" current.
 
-2. BACKFILL, one day at a time: real receipt volume is large (~12k/day
-   company-wide), so pulling a month of history in one request would be far
-   too slow/expensive for one HTTP call or even one cron run. Instead, each
-   run backfills exactly one additional day older than whatever's already
-   in the DB, until BACKFILL_TARGET_DAYS of history is reached. Running
-   hourly, a 30-day target fills in within about 30 hours of the first
-   deploy — slower than a one-shot backfill, but each run stays cheap and
-   the whole thing is safely resumable (upserts are idempotent, so a run
-   that dies partway just gets picked up again next hour).
+2. BACKFILL, one chunk at a time: real receipt volume is large (~12k/day
+   company-wide), so pulling the whole year in one request would be far too
+   slow/expensive for one HTTP call. Instead, each run backfills
+   BACKFILL_CHUNK_DAYS more days older than whatever's already in the DB
+   (each day pulled — and committed — separately within the chunk, so a
+   mid-chunk failure doesn't lose the days that already succeeded), until
+   the target (Jan 1 of the current year — the user confirmed 2026-only
+   history is enough, 2026-08-24) is reached. At 5 days/run, hourly, the
+   full year backfills in under two days — slower than a one-shot backfill,
+   but each run stays a bounded, safe size, and the whole thing is
+   resumable (idempotent upserts — a run that dies partway just gets picked
+   up again next hour from wherever it left off).
 """
 from __future__ import annotations
 
@@ -32,8 +35,14 @@ from app.db.models import LoyverseDaily, SyncLog
 from app.etl import loyverse_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 
-BACKFILL_TARGET_DAYS = 30
+BACKFILL_CHUNK_DAYS = 5
 INCREMENTAL_LOOKBACK_HOURS = 26  # >24h so a skipped/failed hourly run doesn't leave a gap
+
+
+def _backfill_target_date(now: datetime) -> str:
+    """Jan 1 of `now`'s year — the user confirmed (2026-08-24) that real
+    history only needs to cover the current year, not further back."""
+    return now.replace(month=1, day=1).strftime("%Y-%m-%d")
 
 
 def _iso(dt: datetime) -> str:
@@ -77,46 +86,72 @@ def _earliest_synced_date(db: Session) -> str | None:
 
 def sync_loyverse(db: Session, settings: Settings) -> dict:
     started = datetime.now(timezone.utc)
-    try:
-        now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
 
-        # 1. Incremental — always runs, keeps "today" current.
+    # 1. Incremental — always runs, keeps "today" current. Its own
+    # try/except so a backfill-chunk failure below still lets this succeed
+    # and be logged, and vice versa.
+    try:
         incr_min = _iso(now - timedelta(hours=INCREMENTAL_LOOKBACK_HOURS))
         incr_max = _iso(now)
         incremental_count = _pull_and_upsert_window(db, settings, incr_min, incr_max)
+        db.commit()
+        incremental_error = None
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        incremental_count = 0
+        incremental_error = str(exc)[:1000]
 
-        # 2. Backfill — one additional day older than what's already stored,
-        # up to BACKFILL_TARGET_DAYS back. No-ops once the target is reached.
-        target_date = (now - timedelta(days=BACKFILL_TARGET_DAYS)).strftime("%Y-%m-%d")
-        earliest = _earliest_synced_date(db)
-        backfill_count = 0
-        backfilled_date = None
-        if earliest is None or earliest > target_date:
-            # earliest is a "YYYY-MM-DD" string; if no rows yet, start from yesterday.
+    # 2. Backfill — up to BACKFILL_CHUNK_DAYS more days older than whatever's
+    # already stored, each pulled and committed one day at a time so a
+    # failure partway through the chunk keeps whatever already succeeded.
+    target_date = _backfill_target_date(now)
+    backfilled_dates: list[str] = []
+    backfill_receipts_total = 0
+    backfill_error = None
+    try:
+        for _ in range(BACKFILL_CHUNK_DAYS):
+            earliest = _earliest_synced_date(db)
+            if earliest is not None and earliest <= target_date:
+                break  # target reached
             anchor = datetime.strptime(earliest, "%Y-%m-%d") if earliest else now
-            backfill_day = (anchor - timedelta(days=1))
-            backfilled_date = backfill_day.strftime("%Y-%m-%d")
+            backfill_day = anchor - timedelta(days=1)
+            day_label = backfill_day.strftime("%Y-%m-%d")
             day_min = _iso(backfill_day.replace(hour=0, minute=0, second=0, microsecond=0))
             day_max = _iso((backfill_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
-            backfill_count = _pull_and_upsert_window(db, settings, day_min, day_max)
-
-        db.add(SyncLog(
-            source="loyverse", success=True,
-            message=f"incremental={incremental_count} receipts; backfilled {backfilled_date or 'nothing (target reached)'} ({backfill_count} receipts)",
-            started_at=started, finished_at=datetime.now(timezone.utc),
-        ))
-        db.commit()
-        return {
-            "success": True,
-            "incremental_receipts": incremental_count,
-            "backfilled_date": backfilled_date,
-            "backfill_receipts": backfill_count,
-        }
-    except Exception as exc:  # noqa: BLE001 — must never crash the hourly job silently
+            count = _pull_and_upsert_window(db, settings, day_min, day_max)
+            db.commit()
+            backfilled_dates.append(day_label)
+            backfill_receipts_total += count
+    except Exception as exc:  # noqa: BLE001
         db.rollback()
-        db.add(SyncLog(
-            source="loyverse", success=False, message=str(exc)[:2000],
-            started_at=started, finished_at=datetime.now(timezone.utc),
-        ))
-        db.commit()
-        raise
+        backfill_error = str(exc)[:1000]
+
+    success = incremental_error is None and backfill_error is None
+    message = (
+        f"incremental={incremental_count} receipts"
+        + (f" (FAILED: {incremental_error})" if incremental_error else "")
+        + f"; backfilled {len(backfilled_dates)} day(s) "
+        + (f"[{backfilled_dates[0]}..{backfilled_dates[-1]}]" if backfilled_dates else "(none — target reached or nothing to do)")
+        + f", {backfill_receipts_total} receipts"
+        + (f" (FAILED: {backfill_error})" if backfill_error else "")
+    )
+    db.add(SyncLog(
+        source="loyverse", success=success, message=message[:2000],
+        started_at=started, finished_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+    result = {
+        "success": success,
+        "incremental_receipts": incremental_count,
+        "incremental_error": incremental_error,
+        "backfilled_dates": backfilled_dates,
+        "backfill_receipts": backfill_receipts_total,
+        "backfill_error": backfill_error,
+    }
+    if not success:
+        # run_loyverse_once.py (the cron entrypoint) expects an exception on
+        # failure so it exits non-zero and Render's cron shows a failed run.
+        raise RuntimeError(message)
+    return result
