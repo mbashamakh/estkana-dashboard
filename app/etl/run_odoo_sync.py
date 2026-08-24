@@ -75,6 +75,15 @@ def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict]) 
                     db, kind="overhead", name=account["name"], month_row=row,
                     is_complete=row["m"] in complete_labels,
                 )
+        # Combined "all overhead cost centers" total (includes Kaftrea, unlike
+        # overhead_accounts above which is only the 7 named-breakdown accounts
+        # the user asked to see individually) — needed so /api/pnl's
+        # company_total and PNL.overhead.months are complete, not undercounted.
+        for row in result["overhead"]["months"]:
+            _upsert_analytic_monthly(
+                db, kind="overhead_total", name="ALL", month_row=row,
+                is_complete=row["m"] in complete_labels,
+            )
 
         db.add(SyncLog(
             source="odoo", success=True, message=f"{len(result['branches'])} branches synced",

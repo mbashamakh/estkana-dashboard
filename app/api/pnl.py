@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.db.models import AnalyticMonthly, SyncLog
 from app.db.session import get_db
 from app.etl.odoo_pnl import (
+    DORMANT_NAMES,
     LOYVERSE_MAP,
     OVERHEAD,
     OVERHEAD_ACCOUNTS_OF_INTEREST,
@@ -44,6 +45,14 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
     overhead_rows = db.scalars(
         select(AnalyticMonthly).where(AnalyticMonthly.kind == "overhead").order_by(AnalyticMonthly.name, AnalyticMonthly.month)
     ).all()
+    # Combined all-overhead-cost-centers total (includes Kaftrea, unlike
+    # overhead_rows above which is only the 7 named-breakdown accounts) — the
+    # correct source for PNL.overhead.months and for company_total's overhead
+    # component. See run_odoo_sync.py for how this is written.
+    overhead_total_rows = db.scalars(
+        select(AnalyticMonthly).where(AnalyticMonthly.kind == "overhead_total", AnalyticMonthly.name == "ALL")
+        .order_by(AnalyticMonthly.month)
+    ).all()
 
     branches_by_name: dict[str, list[AnalyticMonthly]] = {}
     for row in branch_rows:
@@ -54,7 +63,7 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
     for name, rows in sorted(branches_by_name.items()):
         months = [_month_row_from_db(r) for r in rows]
         branches.append({
-            "code": None,  # not modeled in AnalyticMonthly — see note in db/models.py
+            "code": "—",  # not modeled in AnalyticMonthly — see note in db/models.py
             "odoo_name": name,
             "loyverse_name": LOYVERSE_MAP.get(name, "NO MATCH"),
             "months": months,
@@ -84,13 +93,15 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         overhead_by_name.setdefault(row.name, []).append(row)
 
     overhead_accounts = [
-        {"name": name, "code": None, "months": [_month_row_from_db(r) for r in overhead_by_name.get(name, [])]}
+        {"name": name, "code": "—", "months": [_month_row_from_db(r) for r in overhead_by_name.get(name, [])]}
         for name in OVERHEAD_ACCOUNTS_OF_INTEREST
     ]
     ho_months = next((a["months"] for a in overhead_accounts if a["name"] == "HO"), [])
 
+    overhead_months = [_month_row_from_db(r) for r in overhead_total_rows]
+
     company_months_by_month: dict[str, dict] = {}
-    for row in list(branch_rows) + list(overhead_rows):
+    for row in list(branch_rows) + list(overhead_total_rows):
         agg = company_months_by_month.setdefault(row.month, {"m": row.month, "revenue": 0.0, "cogs": 0.0, "opex": 0.0})
         agg["revenue"] += row.revenue
         agg["cogs"] += row.cogs
@@ -116,7 +127,9 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         "branches": branches,
         "branch_rollup": {"months": rollup_months, "ytd": ytd_from_months(rollup_months)},
         "company_total": {"months": company_months, "ytd": ytd_from_months(company_months)},
+        "overhead": {"months": overhead_months},
         "ho": {"months": ho_months, "cost_center": "[HO] HO"},
         "overhead_accounts": overhead_accounts,
         "overhead_excluded_from_branch_rollup": sorted(OVERHEAD),
+        "dormant_excluded_from_branch_rollup": sorted(DORMANT_NAMES),
     }
