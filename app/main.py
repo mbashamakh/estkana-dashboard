@@ -28,6 +28,7 @@ from app.api.pnl import router as pnl_router
 from app.api.diag import router as diag_router
 from app.auth.routes import router as auth_router
 from app.config import get_settings
+from app.db.migrate import run_startup_migrations
 from app.db.models import User  # noqa: F401 -- ensures model is registered on Base
 from app.db.session import Base, SessionLocal, engine
 
@@ -50,6 +51,7 @@ app.include_router(diag_router)
 
 @app.on_event("startup")
 def on_startup() -> None:
+    run_startup_migrations(engine)
     Base.metadata.create_all(bind=engine)
 
     admin_email = os.getenv("ADMIN_EMAIL")
