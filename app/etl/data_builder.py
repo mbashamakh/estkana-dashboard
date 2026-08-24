@@ -104,18 +104,25 @@ def _available_months(rows: list[LoyverseDaily], year: int, today: date) -> list
     months = []
     for mi in range(1, 13):
         month_start = date(year, mi, 1)
-        if month_start > today or month_start < earliest:
+        if month_start > today:
             continue
         month_end = date(year, mi + 1, 1) - timedelta(days=1) if mi < 12 else date(year, 12, 31)
         is_current_month = (today.year, today.month) == (year, mi)
         if is_current_month:
-            covered_through = today - timedelta(days=1)  # "yesterday" — today itself is still accumulating
+            # The backfill fills backward from "today," so the current month
+            # can — and, early on, will — have real data before it's been
+            # backfilled all the way back to day 1. Show it as soon as any
+            # day in it has synced, not only once earliest reaches day 1;
+            # otherwise the whole Overview section looks broken/empty for
+            # the ~2 days it takes the backfill to reach the current month's
+            # start (see the "8 branches" / blank-dashboard report).
             if latest < month_start:
-                continue
-            is_partial = latest < covered_through
+                continue  # not even day 1's worth of "today" has synced yet
+            covered_through = today - timedelta(days=1)  # "yesterday" — today itself is still accumulating
+            is_partial = latest < covered_through or earliest > month_start
         else:
-            if latest < month_end:
-                continue  # this and every later month aren't backfilled yet
+            if month_start < earliest or latest < month_end:
+                continue  # this past month hasn't been (fully) backfilled yet
             is_partial = False
         months.append((mi, f"{date(year, mi, 1).strftime('%B')} {year}", month_start, month_end, is_partial))
     return months
