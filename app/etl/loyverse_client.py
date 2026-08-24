@@ -115,3 +115,42 @@ def list_receipts_page(
             "limit": limit,
         },
     )
+
+
+def list_all_receipts(
+    settings: Settings,
+    created_at_min: str,
+    created_at_max: str,
+    max_pages: int = 2000,
+) -> list[dict]:
+    """
+    Pages through every receipt in [created_at_min, created_at_max) via the
+    cursor Loyverse returns. `max_pages` is a hard backstop (at 250/page
+    that's 500k receipts) so a bug can't spin this forever against a live
+    API — not expected to ever be hit in practice.
+    """
+    receipts: list[dict] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        page = list_receipts_page(
+            settings, created_at_min=created_at_min, created_at_max=created_at_max,
+            cursor=cursor, limit=250,
+        )
+        receipts.extend(page.get("receipts", []))
+        cursor = page.get("cursor")
+        if not cursor:
+            break
+    return receipts
+
+
+def list_all_items(settings: Settings, max_pages: int = 200) -> list[dict]:
+    """Pages through the full item catalog — {id, item_name, category_id, ...}."""
+    items: list[dict] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        page = list_items_page(settings, cursor=cursor, limit=250)
+        items.extend(page.get("items", []))
+        cursor = page.get("cursor")
+        if not cursor:
+            break
+    return items
