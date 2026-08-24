@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException
 from app.config import get_settings
 from app.db.session import SessionLocal
 from app.etl import loyverse_client, odoo_client
+from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 from app.etl.odoo_client import _authenticate, _execute_kw
 from app.etl.run_odoo_sync import sync_odoo
 
@@ -133,6 +134,58 @@ def diag_loyverse_catalog(secret: str):
             "category_count": len(categories),
             "categories": categories,
             "sample_items": items_page.get("items", []),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/api/_diag/loyverse-agg")
+def diag_loyverse_agg(secret: str, days: int = 2):
+    """
+    Pulls the last `days` days of real receipts + the item catalog, runs
+    them through loyverse_pnl.aggregate_receipts(), and returns a compact
+    per-branch summary — small enough to eyeball, before this gets scaled
+    up to a full historical backfill. Kept to a short window deliberately:
+    this is for verifying the aggregation logic is right, not for pulling
+    real data into the database yet.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    try:
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        created_at_min = (now - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00.000Z")
+        created_at_max = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        receipts = loyverse_client.list_all_receipts(settings, created_at_min, created_at_max)
+        items = loyverse_client.list_all_items(settings)
+        item_category = build_item_category_lookup(items)
+        agg = aggregate_receipts(receipts, item_category)
+
+        branch_summaries = {}
+        for branch, days_data in agg["branches"].items():
+            total_sales = sum(d["sales"] for d in days_data.values())
+            total_orders = sum(d["orders"] for d in days_data.values())
+            total_discount = sum(d["discount_amt"] for d in days_data.values())
+            total_refund = sum(d["refund_amt"] for d in days_data.values())
+            branch_summaries[branch] = {
+                "days_with_activity": len(days_data),
+                "total_sales": round(total_sales, 2),
+                "total_orders": total_orders,
+                "total_discount": round(total_discount, 2),
+                "total_refund": round(total_refund, 2),
+            }
+
+        return {
+            "ok": True,
+            "window": {"from": created_at_min, "to": created_at_max},
+            "raw_receipt_count": len(receipts),
+            "item_catalog_count": len(items),
+            "skipped_unknown_store_receipts": agg["skipped_unknown_store_receipts"],
+            "branch_summaries": branch_summaries,
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
