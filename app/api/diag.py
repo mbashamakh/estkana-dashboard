@@ -16,12 +16,15 @@ import os
 import xmlrpc.client
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.session import SessionLocal
+from app.db.models import LoyverseDaily
 from app.etl import loyverse_client, odoo_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 from app.etl.odoo_client import _authenticate, _execute_kw
+from app.etl.run_loyverse_sync import sync_loyverse
 from app.etl.run_odoo_sync import sync_odoo
 
 router = APIRouter()
@@ -117,6 +120,55 @@ def diag_loyverse(secret: str):
     return result
 
 
+@router.get("/api/_diag/loyverse-sync-now")
+def diag_loyverse_sync_now(secret: str):
+    """
+    One-off manual trigger for the real Loyverse sync (incremental window +
+    one backfill day), ahead of the hourly cron job existing. See
+    run_loyverse_sync.sync_loyverse() for what each run actually does.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    db = SessionLocal()
+    try:
+        result = sync_loyverse(db, settings)
+        return {"ok": True, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
+
+
+@router.get("/api/_diag/loyverse-daily")
+def diag_loyverse_daily(secret: str, branch: str | None = None):
+    """Inspect what's actually stored in loyverse_daily right now, to
+    confirm the sync + backfill are landing correctly. Optional `branch`
+    filters to one branch (e.g. `&branch=ARBEEN` to double check exclusion)."""
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    db = SessionLocal()
+    try:
+        q = select(LoyverseDaily).order_by(LoyverseDaily.branch, LoyverseDaily.date)
+        if branch:
+            q = q.where(LoyverseDaily.branch == branch)
+        rows = db.scalars(q).all()
+        by_branch: dict[str, dict] = {}
+        for r in rows:
+            b = by_branch.setdefault(r.branch, {"days": 0, "earliest": r.date, "latest": r.date, "total_sales": 0.0})
+            b["days"] += 1
+            b["earliest"] = min(b["earliest"], r.date)
+            b["latest"] = max(b["latest"], r.date)
+            b["total_sales"] = round(b["total_sales"] + r.sales, 2)
+        return {"ok": True, "row_count": len(rows), "by_branch": by_branch}
+    finally:
+        db.close()
+
+
 @router.get("/api/_diag/loyverse-catalog")
 def diag_loyverse_catalog(secret: str):
     """Category list + one page of items, to see how to attach a category
@@ -185,6 +237,7 @@ def diag_loyverse_agg(secret: str, days: int = 2):
             "raw_receipt_count": len(receipts),
             "item_catalog_count": len(items),
             "skipped_unknown_store_receipts": agg["skipped_unknown_store_receipts"],
+            "skipped_test_branch_receipts": agg["skipped_test_branch_receipts"],
             "branch_summaries": branch_summaries,
         }
     except Exception as exc:  # noqa: BLE001

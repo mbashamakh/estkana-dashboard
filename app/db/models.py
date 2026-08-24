@@ -78,6 +78,35 @@ class AnalyticMonthly(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
+class LoyverseDaily(Base):
+    """
+    One row per (branch, date) — aggregated from raw Loyverse receipts by
+    etl/loyverse_pnl.aggregate_receipts(). Deliberately stores the
+    aggregate, not raw receipts: a single branch does thousands of receipts
+    a day, so keeping the daily summary (this table) instead of the raw
+    transactions is what keeps this cheap to store and fast to query,
+    matching how the dashboard actually consumes it (daily trend, top
+    products, category mix — never a single receipt).
+
+    `items` is a JSON blob ({item_name: {"cat", "qty", "sales"}}) rather
+    than its own table for the same reason AnalyticMonthly didn't get one
+    for its month rows — this is fine to query/aggregate in Python at read
+    time and isn't worth a join for what's currently a single dashboard.
+    """
+    __tablename__ = "loyverse_daily"
+    __table_args__ = (UniqueConstraint("branch", "date", name="uq_loyverse_daily"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    branch: Mapped[str] = mapped_column(String, nullable=False)  # odoo_name, e.g. "ARBEEN"
+    date: Mapped[str] = mapped_column(String, nullable=False)    # "2026-08-16"
+    sales: Mapped[float] = mapped_column(Float, default=0.0)
+    orders: Mapped[int] = mapped_column(Integer, default=0)
+    discount_amt: Mapped[float] = mapped_column(Float, default=0.0)
+    refund_amt: Mapped[float] = mapped_column(Float, default=0.0)
+    items: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
 class CustomerRating(Base):
     """
     Manually maintained — Customer Rating is sourced from Google Maps via a

@@ -23,6 +23,13 @@ from collections import defaultdict
 from app.etl.loyverse_category_map import display_category_for
 from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
 
+# ARBEEN's Loyverse account is a test setup for a different POS app
+# ("Looped") the user is evaluating — confirmed by the user 2026-08-24, not
+# real sales activity. Excluded from aggregation entirely until that
+# integration is ready and the user says to connect it. (ARBEEN still gets
+# real financials from Odoo — this exclusion is Loyverse/sales-side only.)
+LOYVERSE_TEST_BRANCHES = {"ARBEEN"}
+
 
 def build_item_category_lookup(items: list[dict]) -> dict[str, str]:
     """item_id -> dashboard display category (Other/Shabati/Bakery & Snacks/
@@ -62,12 +69,16 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
     }))
 
     skipped_unknown_store = 0
+    skipped_test_branch = 0
     for r in receipts:
         if r.get("cancelled_at"):
             continue
         branch = STORE_ID_TO_ODOO_NAME.get(r.get("store_id"))
         if branch is None:
             skipped_unknown_store += 1
+            continue
+        if branch in LOYVERSE_TEST_BRANCHES:
+            skipped_test_branch += 1
             continue
 
         day_bucket = out[branch][_day(r)]
@@ -97,4 +108,8 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
         }
         for branch, days in out.items()
     }
-    return {"branches": branches, "skipped_unknown_store_receipts": skipped_unknown_store}
+    return {
+        "branches": branches,
+        "skipped_unknown_store_receipts": skipped_unknown_store,
+        "skipped_test_branch_receipts": skipped_test_branch,
+    }
