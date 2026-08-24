@@ -23,11 +23,10 @@ CATEGORY_ID_TO_DISPLAY = {
     "2c19bfa6-4452-4daa-86dd-3d1235f1c23a": "Other",             # Umm Nayef Breakfast
     "575388df-8940-4e90-937c-5b62a9a4449e": "Other",             # Masoub & Areeka
     "eda535cc-1420-41f7-92b2-6460c80c2016": "Bakery & Snacks",   # Appetizers & Add-ons
-    # NOTE: user's sheet mapped "Fridge (packaged/cold items)" -> "Hot drinks",
-    # which reads like it should probably be a cold bucket instead — flagged
-    # back to the user for confirmation before this is relied on for real
-    # numbers. Implemented literally as specified for now.
-    "4d129c43-a6a6-43e4-94e4-d09207294d38": "Hot drinks",        # Fridge (packaged / cold items)
+    # "ثلاجات" ("Fridge") is just what the branch staff named this category in
+    # Loyverse — despite the name, it actually holds hot-drink items.
+    # Confirmed intentional by the user 2026-08-24, not a mapping mistake.
+    "4d129c43-a6a6-43e4-94e4-d09207294d38": "Hot drinks",        # "Fridge" (misnamed — actually hot drinks)
     "3005cd6f-8e74-4ba2-a4ef-6e1adacd6e49": "Other",             # Shawarma
     "51d8d7e8-dcaa-4f7f-9d48-d9902a765a23": "Cold Drink",        # Cold Drinks
     "dd51c222-689f-4e70-a444-6f50a90ce892": "Other",             # Egyptian Pastries & Mutabbaq
