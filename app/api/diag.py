@@ -295,3 +295,37 @@ def diag_odoo(secret: str):
         "expected": 148293.4,
         "matches_known_good": arbeen_jan == 148293.4,
     }
+
+
+@router.get("/api/_diag/reset-password")
+def diag_reset_password(secret: str, email: str, new_password: str):
+    """
+    One-off admin-password reset, for when the original ADMIN_PASSWORD used
+    on first boot has been lost -- changing the ADMIN_PASSWORD env var alone
+    does nothing after first boot, since main.py's bootstrap only runs while
+    the users table is empty. Sets the given user's password directly (or
+    creates them as an active admin if they don't exist yet).
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    import bcrypt
+    from app.db.models import User
+
+    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == email.lower().strip()))
+        if user:
+            user.password_hash = pw_hash
+            user.is_active = True
+            action = "updated"
+        else:
+            user = User(email=email.lower().strip(), password_hash=pw_hash, is_admin=True, is_active=True)
+            db.add(user)
+            action = "created"
+        db.commit()
+        return {"ok": True, "email": user.email, "action": action}
+    finally:
+        db.close()
