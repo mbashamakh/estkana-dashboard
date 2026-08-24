@@ -45,14 +45,14 @@ def _upsert_day(db: Session, branch: str, date: str, day_data: dict) -> None:
         branch=branch, date=date,
         sales=day_data["sales"], orders=day_data["orders"],
         discount_amt=day_data["discount_amt"], refund_amt=day_data["refund_amt"],
-        items=day_data["items"],
+        line_items=day_data["items"],
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["branch", "date"],
         set_={
             "sales": stmt.excluded.sales, "orders": stmt.excluded.orders,
             "discount_amt": stmt.excluded.discount_amt, "refund_amt": stmt.excluded.refund_amt,
-            "items": stmt.excluded.items, "updated_at": datetime.now(timezone.utc),
+            "line_items": stmt.excluded.line_items, "updated_at": datetime.now(timezone.utc),
         },
     )
     db.execute(stmt)

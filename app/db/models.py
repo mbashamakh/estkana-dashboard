@@ -88,10 +88,15 @@ class LoyverseDaily(Base):
     matching how the dashboard actually consumes it (daily trend, top
     products, category mix — never a single receipt).
 
-    `items` is a JSON blob ({item_name: {"cat", "qty", "sales"}}) rather
-    than its own table for the same reason AnalyticMonthly didn't get one
-    for its month rows — this is fine to query/aggregate in Python at read
-    time and isn't worth a join for what's currently a single dashboard.
+    `line_items` is a JSON blob ({item_name: {"cat", "qty", "sales"}})
+    rather than its own table for the same reason AnalyticMonthly didn't
+    get one for its month rows — this is fine to query/aggregate in Python
+    at read time and isn't worth a join for what's currently a single
+    dashboard. Named `line_items`, not `items` — SQLAlchemy's upsert
+    `excluded` proxy resolves `.items` to the dict-like `.items()` method
+    before it resolves to a column of that name, so a column literally
+    named "items" silently breaks `on_conflict_do_update`. Learned that the
+    hard way; renaming was simpler than fighting the attribute lookup.
     """
     __tablename__ = "loyverse_daily"
     __table_args__ = (UniqueConstraint("branch", "date", name="uq_loyverse_daily"),)
@@ -103,7 +108,7 @@ class LoyverseDaily(Base):
     orders: Mapped[int] = mapped_column(Integer, default=0)
     discount_amt: Mapped[float] = mapped_column(Float, default=0.0)
     refund_amt: Mapped[float] = mapped_column(Float, default=0.0)
-    items: Mapped[dict] = mapped_column(JSON, default=dict)
+    line_items: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
