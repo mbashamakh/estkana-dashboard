@@ -82,23 +82,38 @@ def diag_loyverse(secret: str):
         raise HTTPException(status_code=404)
 
     settings = get_settings()
+    result: dict = {}
+
+    # Two independent try/excepts so a hang/failure on one call doesn't hide
+    # whether the other one actually works.
     try:
         stores = loyverse_client.list_stores(settings)
-        receipts_page = loyverse_client.list_receipts_page(
-            settings,
-            created_at_min="2026-08-01T00:00:00.000Z",
-            created_at_max="2026-08-17T00:00:00.000Z",
-            limit=3,
-        )
-        return {
+        result["stores"] = {
             "ok": True,
             "store_count": len(stores),
             "stores": [{"id": s.get("id"), "name": s.get("name")} for s in stores],
-            "sample_receipt_count": len(receipts_page.get("receipts", [])),
-            "sample_receipts": receipts_page.get("receipts", []),
         }
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc)}
+        result["stores"] = {"ok": False, "error": str(exc)}
+
+    try:
+        receipts_page = loyverse_client.list_receipts_page(
+            settings,
+            created_at_min="2026-08-15T00:00:00.000Z",
+            created_at_max="2026-08-17T00:00:00.000Z",
+            limit=3,
+        )
+        result["receipts"] = {
+            "ok": True,
+            "sample_receipt_count": len(receipts_page.get("receipts", [])),
+            "sample_receipts": receipts_page.get("receipts", []),
+            "cursor": receipts_page.get("cursor"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        result["receipts"] = {"ok": False, "error": str(exc)}
+
+    result["ok"] = result["stores"]["ok"] and result["receipts"]["ok"]
+    return result
 
 
 @router.get("/api/_diag/odoo-dblist")

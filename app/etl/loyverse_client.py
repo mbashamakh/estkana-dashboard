@@ -1,10 +1,15 @@
 """
 Live Loyverse REST API client.
 
-STATUS: just started — connectivity not yet verified against the real
-account (same sandbox network restriction as odoo_client.py; this has to be
-tested by deploying to Render and checking through a diagnostic endpoint,
-not from this dev sandbox).
+STATUS: connectivity attempted but not yet confirmed — the first live call
+(via the diag endpoint, from Render) hung and hit a read timeout rather than
+returning a fast success or a fast auth error. That pointed at the raw
+`urllib` implementation this started with: `urllib.request` is known to
+sometimes stall mid-response-body-read against servers using chunked
+transfer encoding + keep-alive, rather than failing fast. Switched to
+`httpx` (already a project dependency, used elsewhere for FastAPI's async
+stack) which handles that correctly and gives proper separate connect/read
+timeouts instead of one lump per-call timeout.
 
 Auth: simple Bearer token (Settings.loyverse_api_token), no OAuth flow needed
 since this is a single-account personal access token, not a multi-merchant
@@ -26,10 +31,7 @@ dashboard:
 """
 from __future__ import annotations
 
-import urllib.error
-import urllib.parse
-import urllib.request
-import json as jsonlib
+import httpx
 
 from app.config import Settings
 
@@ -38,29 +40,40 @@ class LoyverseError(RuntimeError):
     pass
 
 
+# Separate connect/read timeouts rather than one lump number — a slow-to-
+# establish connection and a slow-to-stream response are different failure
+# modes and worth distinguishing when this inevitably needs debugging again.
+_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+
+
+def _client(settings: Settings) -> httpx.Client:
+    return httpx.Client(
+        base_url=settings.loyverse_base_url,
+        headers={
+            "Authorization": f"Bearer {settings.loyverse_api_token}",
+            "Accept": "application/json",
+        },
+        timeout=_TIMEOUT,
+    )
+
+
 def _get(settings: Settings, path: str, params: dict | None = None) -> dict:
     if not settings.loyverse_configured:
         raise LoyverseError(
             "Loyverse is not configured — set LOYVERSE_API_TOKEN as an environment variable."
         )
-    url = f"{settings.loyverse_base_url}{path}"
-    if params:
-        url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {settings.loyverse_api_token}",
-            "Accept": "application/json",
-        },
-    )
+    clean_params = {k: v for k, v in (params or {}).items() if v is not None}
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return jsonlib.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise LoyverseError(f"Loyverse API {exc.code} on {path}: {body[:500]}") from exc
-    except urllib.error.URLError as exc:
+        with _client(settings) as client:
+            resp = client.get(path, params=clean_params)
+    except httpx.TimeoutException as exc:
+        raise LoyverseError(f"Loyverse API timed out on {path} ({type(exc).__name__}): {exc}") from exc
+    except httpx.HTTPError as exc:
         raise LoyverseError(f"Loyverse API connection failed on {path}: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise LoyverseError(f"Loyverse API {resp.status_code} on {path}: {resp.text[:500]}")
+    return resp.json()
 
 
 def list_stores(settings: Settings) -> list[dict]:
