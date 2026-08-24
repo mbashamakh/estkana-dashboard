@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.etl import odoo_client
+from app.etl import loyverse_client, odoo_client
 from app.etl.odoo_client import _authenticate, _execute_kw
 from app.etl.run_odoo_sync import sync_odoo
 
@@ -65,6 +65,38 @@ def diag_odoo_fields(secret: str, model: str = "account.analytic.line", search: 
         if search:
             fields = {k: v for k, v in fields.items() if search.lower() in k.lower()}
         return {"ok": True, "field_count": len(fields), "fields": fields}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/api/_diag/loyverse")
+def diag_loyverse(secret: str):
+    """
+    Verifies the Loyverse token works and shows the real store list + a
+    tiny receipts sample, so I can (a) confirm the token is valid, (b)
+    check the real store names against odoo_pnl.LOYVERSE_MAP, and (c) see
+    what a real receipt object looks like before building the full ETL.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    try:
+        stores = loyverse_client.list_stores(settings)
+        receipts_page = loyverse_client.list_receipts_page(
+            settings,
+            created_at_min="2026-08-01T00:00:00.000Z",
+            created_at_max="2026-08-17T00:00:00.000Z",
+            limit=3,
+        )
+        return {
+            "ok": True,
+            "store_count": len(stores),
+            "stores": [{"id": s.get("id"), "name": s.get("name")} for s in stores],
+            "sample_receipt_count": len(receipts_page.get("receipts", [])),
+            "sample_receipts": receipts_page.get("receipts", []),
+        }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
