@@ -116,6 +116,28 @@ def diag_loyverse(secret: str):
     return result
 
 
+@router.get("/api/_diag/loyverse-catalog")
+def diag_loyverse_catalog(secret: str):
+    """Category list + one page of items, to see how to attach a category
+    label to each receipt line_item (which only carries item_id/item_name)."""
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    settings = get_settings()
+    try:
+        categories = loyverse_client.list_categories(settings)
+        items_page = loyverse_client.list_items_page(settings, limit=5)
+        return {
+            "ok": True,
+            "category_count": len(categories),
+            "categories": categories,
+            "sample_items": items_page.get("items", []),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/_diag/odoo-dblist")
 def diag_odoo_dblist(secret: str):
     """

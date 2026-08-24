@@ -82,6 +82,18 @@ def list_stores(settings: Settings) -> list[dict]:
     return data.get("stores", [])
 
 
+def list_categories(settings: Settings) -> list[dict]:
+    """[{id, name, color}] — used to label each item's category on receipts,
+    since line_items only carry item_id/item_name, not category."""
+    data = _get(settings, "/categories")
+    return data.get("categories", [])
+
+
+def list_items_page(settings: Settings, cursor: str | None = None, limit: int = 250) -> dict:
+    """One page of the item catalog — {id, item_name, category_id, ...}."""
+    return _get(settings, "/items", {"cursor": cursor, "limit": limit})
+
+
 def list_receipts_page(
     settings: Settings,
     created_at_min: str | None = None,
