@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
+from app.api.data import router as data_router
 from app.api.me import router as me_router
 from app.api.pnl import router as pnl_router
 from app.api.diag import router as diag_router
@@ -45,6 +46,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(pnl_router)
+app.include_router(data_router)
 app.include_router(me_router)
 app.include_router(diag_router)
 
