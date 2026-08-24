@@ -292,7 +292,7 @@
     <div class="card">
       <div class="row-title"><div class="section-title">Daily sales trend</div></div>
       <div class="section-sub">Current period vs. previous period, SAR/day</div>
-      <div class="source-tag" style="margin:-4px 0 10px;">via Loyverse · net of 15% VAT</div>
+      <div class="source-tag" style="margin:-4px 0 10px;">via Loyverse (sample — not yet connected) · net of 15% VAT</div>
       <div class="legend">
         <span class="key"><span class="line" style="background:var(--series-1)"></span>Current period</span>
         <span class="key" id="legendPrevMonth"><span class="line" style="background:var(--text-muted); border-top:2px dashed var(--text-muted);"></span>Previous month</span>
@@ -761,11 +761,11 @@ function renderKPIs(agg) {
   const salesDelta = hasPrev ? (agg.sales - agg.salesPrev) / agg.salesPrev * 100 : null;
   const cards = [
     { label: "Total Sales", value: fmtSAR(agg.sales, true), sub: `${agg.n_branches} branch${agg.n_branches>1?'es':''} · ${periodLabel(state.period)}`,
-      delta: hasPrev ? `${salesDelta>=0?'↑':'↓'} ${Math.abs(salesDelta).toFixed(1)}% vs ${comparisonLabel()}` : null, dir: hasPrev && salesDelta>=0?"up":"down", accent:"var(--series-1)", source:"Odoo" },
-    { label: "Number of Orders", value: agg.orders.toLocaleString(), sub: "orders in period", accent:"var(--series-3)", source:"Loyverse" },
-    { label: "Average Order Value", value: fmtSAR(agg.aov), sub: "Total sales ÷ orders", accent:"var(--series-4)", source:"Loyverse" },
-    { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:"Odoo" },
-    { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs", accent:"var(--series-2)", source:"Odoo" },
+      delta: hasPrev ? `${salesDelta>=0?'↑':'↓'} ${Math.abs(salesDelta).toFixed(1)}% vs ${comparisonLabel()}` : null, dir: hasPrev && salesDelta>=0?"up":"down", accent:"var(--series-1)", source:"Odoo (sample — see P&L section for real data)" },
+    { label: "Number of Orders", value: agg.orders.toLocaleString(), sub: "orders in period", accent:"var(--series-3)", source:"Loyverse (sample — not yet connected)" },
+    { label: "Average Order Value", value: fmtSAR(agg.aov), sub: "Total sales ÷ orders", accent:"var(--series-4)", source:"Loyverse (sample — not yet connected)" },
+    { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:"Odoo (sample — see P&L section for real data)" },
+    { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs", accent:"var(--series-2)", source:"Odoo (sample — see P&L section for real data)" },
   ];
   grid.innerHTML = "";
   cards.forEach(c => {
@@ -882,11 +882,11 @@ function renderCostGrid(agg) {
   const fc = statusOf(agg.food_cost_pct, agg.standard_cost_pct, "lte", 1.5);
   const lc = statusOf(agg.labor_cost_pct, 20, "lte", 2);
   const items = [
-    {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"Excel"},
-    {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:"Odoo"},
-    {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Odoo"},
-    {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:"Odoo"},
-    {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:"Odoo"},
+    {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"Excel (sample — not yet connected)"},
+    {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:"Odoo (sample — see P&L section for real data)"},
+    {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Odoo (sample — see P&L section for real data)"},
+    {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:"Odoo (sample — see P&L section for real data)"},
+    {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:"Odoo (sample — see P&L section for real data)"},
   ];
   grid.innerHTML = "";
   items.forEach(it => {
