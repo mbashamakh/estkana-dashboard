@@ -486,3 +486,40 @@ def diag_loyverse_debug(secret: str, dates: str = "2026-08-01,2026-08-02,2026-08
             for r in rows
         ],
     }
+
+
+@router.get("/api/_diag/loyverse-rewind-cursor")
+def diag_loyverse_rewind_cursor(secret: str, to_date: str):
+    """
+    Manually rewinds the backfill cursor (see SyncCursor's docstring) so the
+    next backfill run(s) redo everything from `to_date` backward -- for
+    recovering a specific day that ended up with a bad value some way OTHER
+    than the two known root causes already fixed (e.g. a transient partial
+    receipts pull under load), since the normal cursor walk never revisits
+    a day once it's moved past it. Safe: upserts are idempotent REPLACEs,
+    so redoing already-good days along the way is harmless, just costs a
+    bit of extra sync time. `to_date` becomes the new `backfilled_through`
+    value, so the next backfill iteration's first target is `to_date` minus
+    one day -- pass the day AFTER the first one you want redone.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from app.db.models import SyncCursor
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    db = SessionLocal()
+    try:
+        before = db.get(SyncCursor, "loyverse")
+        before_value = before.backfilled_through if before else None
+
+        stmt = pg_insert(SyncCursor).values(source="loyverse", backfilled_through=to_date)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["source"], set_={"backfilled_through": stmt.excluded.backfilled_through}
+        )
+        db.execute(stmt)
+        db.commit()
+        return {"ok": True, "cursor_before": before_value, "cursor_after": to_date}
+    finally:
+        db.close()
