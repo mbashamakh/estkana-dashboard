@@ -11,11 +11,19 @@ from __future__ import annotations
 import sys
 
 from app.config import get_settings
-from app.db.session import SessionLocal
+from app.db.migrate import run_startup_migrations
+from app.db.session import Base, SessionLocal, engine
 from app.etl.run_loyverse_sync import sync_loyverse
 
 
 def main() -> int:
+    # Belt-and-suspenders: the web service also does this on every startup,
+    # but this cron job is a separately-deployed process and shouldn't
+    # depend on deploy ordering to get a new table (e.g. sync_cursor) it
+    # needs. Both are idempotent/cheap to call again here.
+    run_startup_migrations(engine)
+    Base.metadata.create_all(bind=engine)
+
     settings = get_settings()
     db = SessionLocal()
     try:

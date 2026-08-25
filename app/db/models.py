@@ -112,6 +112,36 @@ class LoyverseDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
+class SyncCursor(Base):
+    """
+    One row per ETL source — an EXPLICIT marker of how far a resumable,
+    walk-backward sync (currently just Loyverse's backfill) has
+    deliberately, completely covered. Deliberately separate from asking
+    "what's the oldest date already in the data table" (e.g. MIN(date) on
+    LoyverseDaily), because that turned out to be an unreliable signal: a
+    receipt's `created_at` (which defines the ETL's fetch window) and its
+    `receipt_date` (the actual transaction day it's bucketed under) can
+    differ by a few minutes across a midnight boundary -- e.g. an order
+    closed just after midnight local time -- see etl/loyverse_pnl.py's
+    _day() docstring. That stray receipt lands a tiny sliver of real data
+    on the day BEFORE the day actually being backfilled. When the old
+    backfill loop used "does ANY row exist for date D" as its "is D done"
+    check, that stray sliver made it think D was already fully synced and
+    skip it forever -- silently leaving every other calendar day
+    company-wide with only a few stray receipts instead of the real daily
+    total (root-caused 2026-08-25 from a live ~50% sales undercount).
+    This cursor is only ever advanced by the backfill loop itself actually
+    completing a deliberate, dedicated full-day pull -- never inferred
+    from whatever else happens to already be in the data table.
+    """
+    __tablename__ = "sync_cursor"
+
+    source: Mapped[str] = mapped_column(String, primary_key=True)  # "loyverse"
+    # Oldest date confirmed FULLY, deliberately backfilled so far, e.g. "2026-08-02".
+    backfilled_through: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
 class CustomerRating(Base):
     """
     Manually maintained — Customer Rating is sourced from Google Maps via a

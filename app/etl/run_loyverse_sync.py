@@ -31,7 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.db.models import LoyverseDaily, SyncLog
+from app.db.models import LoyverseDaily, SyncCursor, SyncLog
 from app.etl import loyverse_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 
@@ -80,8 +80,30 @@ def _pull_and_upsert_window(db: Session, settings: Settings, created_at_min: str
 
 
 def _earliest_synced_date(db: Session) -> str | None:
+    """Oldest date with ANY row in loyverse_daily -- informational only
+    (used e.g. for the frontend's sync-status display). NOT used to drive
+    the backfill loop itself anymore -- see SyncCursor's docstring for why
+    that was the actual root cause of the every-other-day undercount."""
     row = db.scalars(select(LoyverseDaily.date).order_by(LoyverseDaily.date.asc()).limit(1)).first()
     return row
+
+
+def _get_backfill_cursor(db: Session) -> str | None:
+    """Oldest date CONFIRMED fully, deliberately backfilled -- None means
+    backfill hasn't started yet (or this is a pre-cursor DB that needs one
+    initialized), in which case the walk bootstraps from "today" exactly
+    like before."""
+    cursor = db.get(SyncCursor, "loyverse")
+    return cursor.backfilled_through if cursor else None
+
+
+def _advance_backfill_cursor(db: Session, date_label: str) -> None:
+    stmt = pg_insert(SyncCursor).values(source="loyverse", backfilled_through=date_label)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["source"],
+        set_={"backfilled_through": stmt.excluded.backfilled_through, "updated_at": datetime.now(timezone.utc)},
+    )
+    db.execute(stmt)
 
 
 def sync_loyverse(db: Session, settings: Settings) -> dict:
@@ -111,15 +133,22 @@ def sync_loyverse(db: Session, settings: Settings) -> dict:
     backfill_error = None
     try:
         for _ in range(BACKFILL_CHUNK_DAYS):
-            earliest = _earliest_synced_date(db)
-            if earliest is not None and earliest <= target_date:
+            cursor = _get_backfill_cursor(db)
+            if cursor is not None and cursor <= target_date:
                 break  # target reached
-            anchor = datetime.strptime(earliest, "%Y-%m-%d") if earliest else now
+            anchor = datetime.strptime(cursor, "%Y-%m-%d") if cursor else now
             backfill_day = anchor - timedelta(days=1)
             day_label = backfill_day.strftime("%Y-%m-%d")
             day_min = _iso(backfill_day.replace(hour=0, minute=0, second=0, microsecond=0))
             day_max = _iso((backfill_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
             count = _pull_and_upsert_window(db, settings, day_min, day_max)
+            # Cursor only ever advances on a deliberate, completed pull of
+            # exactly this day -- never inferred from what a stray
+            # cross-midnight receipt happened to already leave in the
+            # table (see SyncCursor's docstring). This is what makes a day
+            # that received only incidental spillover data still get its
+            # own real backfill turn, instead of being skipped forever.
+            _advance_backfill_cursor(db, day_label)
             db.commit()
             backfilled_dates.append(day_label)
             backfill_receipts_total += count
