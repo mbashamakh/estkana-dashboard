@@ -5,9 +5,10 @@ with loyverse_pnl.aggregate_receipts(), upsert into LoyverseDaily.
 Two things happen on every run, both bounded so a single run stays fast
 enough for an hourly cron job:
 
-1. INCREMENTAL: re-pull the last few hours (with overlap, so a receipt that
-   posts a bit late doesn't get missed) and upsert those days. This is what
-   keeps "today" current.
+1. INCREMENTAL: re-pull today's and yesterday's FULL calendar-day windows
+   (not a rolling created_at slice -- see sync_loyverse()'s docstring for
+   why that broke) and upsert those two days. This is what keeps "today"
+   and "yesterday" current.
 
 2. BACKFILL, one chunk at a time: real receipt volume is large (~12k/day
    company-wide), so pulling the whole year in one request would be far too
@@ -36,7 +37,6 @@ from app.etl import loyverse_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 
 BACKFILL_CHUNK_DAYS = 5
-INCREMENTAL_LOOKBACK_HOURS = 26  # >24h so a skipped/failed hourly run doesn't leave a gap
 
 
 def _backfill_target_date(now: datetime) -> str:
@@ -79,6 +79,14 @@ def _pull_and_upsert_window(db: Session, settings: Settings, created_at_min: str
     return len(receipts)
 
 
+def _pull_and_upsert_full_day(db: Session, settings: Settings, day: datetime) -> int:
+    """Like _pull_and_upsert_window, but for one whole calendar day
+    (day 00:00 -> day+1 00:00), regardless of what time `day` itself is."""
+    day_min = _iso(day.replace(hour=0, minute=0, second=0, microsecond=0))
+    day_max = _iso((day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+    return _pull_and_upsert_window(db, settings, day_min, day_max)
+
+
 def _earliest_synced_date(db: Session) -> str | None:
     """Oldest date with ANY row in loyverse_daily -- informational only
     (used e.g. for the frontend's sync-status display). NOT used to drive
@@ -110,13 +118,33 @@ def sync_loyverse(db: Session, settings: Settings) -> dict:
     started = datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)
 
-    # 1. Incremental — always runs, keeps "today" current. Its own
-    # try/except so a backfill-chunk failure below still lets this succeed
-    # and be logged, and vice versa.
+    # 1. Incremental — always runs, keeps "today" and "yesterday" current.
+    # Its own try/except so a backfill-chunk failure below still lets this
+    # succeed and be logged, and vice versa.
+    #
+    # Pulls two full, calendar-aligned day windows rather than one rolling
+    # created_at_min/max window (the old INCREMENTAL_LOOKBACK_HOURS=26h
+    # approach). That rolling window silently corrupted "yesterday" once
+    # its remaining hours aged out of the lookback: _upsert_day() REPLACES
+    # a day's total outright, so a run whose 26h window only partially
+    # overlapped yesterday would overwrite its correct, complete total with
+    # a partial one -- and since backfill only ever walks further into the
+    # past (never back to yesterday once it's moved on), nothing would ever
+    # restore it. Pulling each day as its own full [00:00, 24:00) window
+    # every run makes that impossible: yesterday is always re-derived from
+    # its ENTIRE day, never a partial slice.
+    #
+    # Order matters here: today is pulled first, then yesterday. A day's
+    # window can legitimately net a couple of stray receipts dated the
+    # day before (see loyverse_pnl.py's _day() docstring, and SyncCursor's
+    # docstring for how this exact spillover broke the backfill cursor) --
+    # pulling yesterday LAST means its own authoritative full-day pull is
+    # always what's left standing, overwriting any such spillover from
+    # today's pull rather than the other way around.
     try:
-        incr_min = _iso(now - timedelta(hours=INCREMENTAL_LOOKBACK_HOURS))
-        incr_max = _iso(now)
-        incremental_count = _pull_and_upsert_window(db, settings, incr_min, incr_max)
+        today_count = _pull_and_upsert_full_day(db, settings, now)
+        yesterday_count = _pull_and_upsert_full_day(db, settings, now - timedelta(days=1))
+        incremental_count = today_count + yesterday_count
         db.commit()
         incremental_error = None
     except Exception as exc:  # noqa: BLE001
