@@ -206,7 +206,22 @@ def build_data_response(db: Session) -> dict:
         )[:20]
 
         monthly_rows = []
-        for mi, label, _s, _e, _partial in months:
+        for position, (mi, label, _s, _e, _partial) in enumerate(months, start=1):
+            # `mi` here is the true calendar month (1-12) -- needed to look
+            # up the right row in the sample/averaged monthly data below,
+            # which is keyed by calendar month. But the OUTPUT "mi" field
+            # must be `position` (this month's 1-based index within the
+            # *available* months list), because that's what the frontend's
+            # period selector actually uses (periodSelect option values are
+            # array positions, not calendar months -- see
+            # dashboard.html:initFromData()/monthIndicesFor()). Writing the
+            # true calendar month here silently broke every KPI card and
+            # the trend chart's "current period" line to SAR 0 as soon as
+            # the available months stopped being a plain Jan..current run
+            # (i.e. as soon as backfill hadn't reached January yet) --
+            # branchMonthlyAgg()'s `b.monthly.filter(m => idxSet.has(m.mi))`
+            # was comparing position-based period values against
+            # calendar-month mi values and never matching.
             real_part = month_agg.get(mi, {"sales": 0.0, "orders": 0, "discount_amt": 0.0, "refund_amt": 0.0})
             sample_part = (
                 {f: sample_b["monthly"][mi - 1][f] for f in _SAMPLE_ONLY_MONTHLY_FIELDS}
@@ -214,7 +229,7 @@ def build_data_response(db: Session) -> dict:
                 else avg["monthly"].get(mi, {f: 0.0 for f in _SAMPLE_ONLY_MONTHLY_FIELDS})
             )
             monthly_rows.append({
-                "mi": mi, "m": label,
+                "mi": position, "m": label,
                 "sales": real_part["sales"], "sales_prev": None,
                 "orders": real_part["orders"],
                 "discount_amt": real_part["discount_amt"], "refund_amt": real_part["refund_amt"],
@@ -243,12 +258,24 @@ def build_data_response(db: Session) -> dict:
         })
 
     month_names = [f"{label}{' (partial — syncing)' if partial else ''}" for _mi, label, _s, _e, partial in months]
-    month_ranges = []
-    offset = 0
-    for _mi, _label, m_start, m_end, _partial in months:
-        days_in_month = (min(m_end, today) - m_start).days + 1
-        month_ranges.append([offset, offset + days_in_month])
-        offset += days_in_month
+    # Offsets here MUST be actual calendar days-since-Jan-1, matching how
+    # each branch's `daily` array is indexed above (offset = (d - Jan1).days)
+    # -- NOT a running count across only the available months. Those two
+    # only coincide once `months` happens to start at January with no gap;
+    # right now (backfill still in progress, earliest synced date is well
+    # after Jan 1) the available months are a trailing run starting mid-year,
+    # so a positional offset would point at the wrong days entirely (e.g.
+    # "August" landing on Jan-1-relative offset 0, reading Jan 1-25's
+    # all-zero placeholder days instead of August's real data at offset
+    # ~212). This bug shipped and was caught live: the KPI cards and trend
+    # chart's "current period" line showed SAR 0 / a flat zero line while
+    # "same period last year" (sourced differently, from the dense sample
+    # blob) showed real-looking numbers in the same view.
+    year_start = date(year, 1, 1)
+    month_ranges = [
+        [(m_start - year_start).days, (min(m_end, today) - year_start).days + 1]
+        for _mi, _label, m_start, m_end, _partial in months
+    ]
 
     return {
         "branches": branches_out,

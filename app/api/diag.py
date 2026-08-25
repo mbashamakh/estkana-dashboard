@@ -329,3 +329,47 @@ def diag_reset_password(secret: str, email: str, new_password: str):
         return {"ok": True, "email": user.email, "action": action}
     finally:
         db.close()
+
+
+@router.get("/api/_diag/data-preview")
+def diag_data_preview(secret: str):
+    """
+    Diag-secret-protected mirror of GET /api/data's shape, so it can be
+    inspected without a logged-in session -- trimmed to meta/sync_status
+    plus one real branch's aggregate numbers, since the full 18-branch
+    payload is large and most of it isn't needed to sanity-check the
+    month/day-offset plumbing.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from app.etl.data_builder import build_data_response
+
+    db = SessionLocal()
+    try:
+        resp = build_data_response(db)
+    finally:
+        db.close()
+
+    sample_branch = next((b for b in resp["branches"] if b.get("is_real_sales")), None)
+    branch_preview = None
+    if sample_branch:
+        daily = sample_branch["daily"]
+        nonzero = [(i, v) for i, v in enumerate(daily) if v]
+        branch_preview = {
+            "name": sample_branch["name"],
+            "id": sample_branch["id"],
+            "daily_len": len(daily),
+            "daily_nonzero_count": len(nonzero),
+            "daily_nonzero_index_range": [nonzero[0][0], nonzero[-1][0]] if nonzero else None,
+            "daily_nonzero_sample": nonzero[:3],
+            "monthly": sample_branch["monthly"],
+        }
+
+    return {
+        "ok": True,
+        "meta": resp["meta"],
+        "sync_status": resp["sync_status"],
+        "sample_real_branch": branch_preview,
+    }
