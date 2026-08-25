@@ -373,3 +373,53 @@ def diag_data_preview(secret: str):
         "sync_status": resp["sync_status"],
         "sample_real_branch": branch_preview,
     }
+
+
+@router.get("/api/_diag/loyverse-month-audit")
+def diag_loyverse_month_audit(secret: str, month: str = "2026-08"):
+    """
+    Raw LoyverseDaily rows for one month, grouped two ways: company-wide
+    total per DAY (to spot which specific days are anomalously low across
+    every branch at once -- the signature of a sync/windowing bug) and
+    total per BRANCH for the month (to spot a branch-specific issue
+    instead). Bypasses data_builder.py entirely -- this is exactly what's
+    stored, no aggregation-logic assumptions.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    db = SessionLocal()
+    try:
+        rows = db.scalars(
+            select(LoyverseDaily).where(LoyverseDaily.date.like(f"{month}-%")).order_by(LoyverseDaily.date)
+        ).all()
+    finally:
+        db.close()
+
+    by_day: dict[str, dict] = {}
+    by_branch: dict[str, dict] = {}
+    for r in rows:
+        d = by_day.setdefault(r.date, {"sales": 0.0, "orders": 0, "branches": 0})
+        d["sales"] += r.sales
+        d["orders"] += r.orders
+        d["branches"] += 1
+        b = by_branch.setdefault(r.branch, {"sales": 0.0, "orders": 0, "days": 0})
+        b["sales"] += r.sales
+        b["orders"] += r.orders
+        b["days"] += 1
+
+    for d in by_day.values():
+        d["sales"] = round(d["sales"], 2)
+    for b in by_branch.values():
+        b["sales"] = round(b["sales"], 2)
+
+    return {
+        "ok": True,
+        "month": month,
+        "row_count": len(rows),
+        "company_total_sales": round(sum(r.sales for r in rows), 2),
+        "company_total_orders": sum(r.orders for r in rows),
+        "by_day": dict(sorted(by_day.items())),
+        "by_branch": dict(sorted(by_branch.items(), key=lambda kv: -kv[1]["sales"])),
+    }
