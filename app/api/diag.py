@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.db.models import LoyverseDaily
+from app.db.models import LoyverseDaily, SyncLog
 from app.etl import loyverse_client, odoo_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 from app.etl.odoo_client import _authenticate, _execute_kw
@@ -422,4 +422,67 @@ def diag_loyverse_month_audit(secret: str, month: str = "2026-08"):
         "company_total_orders": sum(r.orders for r in rows),
         "by_day": dict(sorted(by_day.items())),
         "by_branch": dict(sorted(by_branch.items(), key=lambda kv: -kv[1]["sales"])),
+    }
+
+
+@router.get("/api/_diag/loyverse-debug")
+def diag_loyverse_debug(secret: str, dates: str = "2026-08-01,2026-08-02,2026-08-03"):
+    """
+    Two things needed to root-cause the every-other-day near-zero pattern
+    found via loyverse-month-audit:
+
+    1. SyncLog history for the loyverse source -- each run's message records
+       exactly which day(s) it backfilled and how many receipts it pulled,
+       so a repeat/skip/jump in the backfill's walk-backward-by-one-day
+       sequence would show up directly here, run by run.
+    2. Raw per-branch rows (with `updated_at`) for a few specific dates, so
+       a near-zero day's row can be checked for WHEN it was last written --
+       once, during initial backfill (meaning the pull itself was
+       incomplete), vs. recently (meaning something is overwriting an
+       already-correct row later).
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    date_list = [d.strip() for d in dates.split(",") if d.strip()]
+
+    db = SessionLocal()
+    try:
+        logs = db.scalars(
+            select(SyncLog)
+            .where(SyncLog.source == "loyverse")
+            .order_by(SyncLog.started_at.desc())
+            .limit(40)
+        ).all()
+        rows = db.scalars(
+            select(LoyverseDaily)
+            .where(LoyverseDaily.date.in_(date_list))
+            .order_by(LoyverseDaily.date, LoyverseDaily.branch)
+        ).all()
+    finally:
+        db.close()
+
+    return {
+        "ok": True,
+        "sync_log": [
+            {
+                "id": l.id,
+                "success": l.success,
+                "message": l.message,
+                "started_at": l.started_at.isoformat() if l.started_at else None,
+                "finished_at": l.finished_at.isoformat() if l.finished_at else None,
+            }
+            for l in logs
+        ],
+        "rows": [
+            {
+                "branch": r.branch,
+                "date": r.date,
+                "sales": r.sales,
+                "orders": r.orders,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ],
     }
