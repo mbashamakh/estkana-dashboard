@@ -531,6 +531,7 @@ function initFromData() {
     category: "all",
     selected: new Set(DATA.branches.map(b => b.id)), // default: all outlets
   };
+  document.getElementById("periodSelect").value = state.period;
 }
 
 function dateAtIndex(i) { const d = new Date(DAILY_START); d.setDate(d.getDate()+i); return d; }
@@ -1239,7 +1240,10 @@ function render() {
 }
 
 // ---------------- Wire up filter controls ----------------
-document.getElementById("periodSelect").value = state.period;
+// (periodSelect's initial value is set in initFromData(), once `state` and
+// its <option>s actually exist -- this used to run here at parse time
+// against the old hardcoded DATA blob, which no longer works now that
+// state/period options come from an async fetch.)
 document.getElementById("periodSelect").addEventListener("change", e => { state.period = e.target.value; render(); });
 document.getElementById("compareSelect").addEventListener("change", e => { state.comparison = e.target.value; render(); });
 document.getElementById("categorySelect").addEventListener("change", e => { state.category = e.target.value; render(); });
