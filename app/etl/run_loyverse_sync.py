@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,10 @@ from app.etl import loyverse_client
 from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
 
 BACKFILL_CHUNK_DAYS = 5
+
+# Arbitrary fixed key for a Postgres session-level advisory lock -- see
+# _try_acquire_sync_lock()'s docstring for why this exists.
+_SYNC_LOCK_KEY = 847362910123
 
 
 def _backfill_target_date(now: datetime) -> str:
@@ -114,7 +118,59 @@ def _advance_backfill_cursor(db: Session, date_label: str) -> None:
     db.execute(stmt)
 
 
+def _try_acquire_sync_lock(db: Session) -> bool:
+    """
+    Postgres session-level advisory lock so two sync_loyverse() runs can
+    never execute concurrently -- e.g. a manually-triggered diagnostic sync
+    overlapping the hourly cron firing at the top of the hour. Nothing
+    previously stopped that: two concurrent runs would each independently
+    read the same backfill cursor, each do their own separate Loyverse API
+    pull for the same day, and race on which one's commit landed last --
+    silently overwriting an already-correct full-day total with whichever
+    run happened to finish second. Caught this live corrupting Aug 8, then
+    Aug 4, then Aug 21 on three separate occasions during manual recovery
+    syncs on 2026-08-25/26.
+    Non-blocking (pg_try_advisory_lock, not pg_advisory_lock): if another
+    run already holds the lock, this run skips entirely rather than
+    queuing and running later anyway, which would just move the same race
+    to a different pair of runs.
+    Session-level (not pg_advisory_xact_lock), because this function calls
+    db.commit() multiple times over its life -- a transaction-level lock
+    would release itself after the very first commit, defeating the point.
+    Released explicitly in sync_loyverse()'s `finally` block; also
+    auto-released by Postgres if the connection is ever dropped uncleanly.
+    """
+    return bool(db.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": _SYNC_LOCK_KEY}).scalar())
+
+
+def _release_sync_lock(db: Session) -> None:
+    db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SYNC_LOCK_KEY})
+
+
 def sync_loyverse(db: Session, settings: Settings) -> dict:
+    if not _try_acquire_sync_lock(db):
+        # Another sync is already running (most likely the hourly cron
+        # overlapping a manual diagnostic trigger). Skip entirely rather
+        # than race it -- see _try_acquire_sync_lock()'s docstring. Not
+        # logged as a SyncLog failure since this is an expected, benign
+        # outcome, not something that needs the user's attention.
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "another loyverse sync was already in progress",
+            "incremental_receipts": 0,
+            "incremental_error": None,
+            "backfilled_dates": [],
+            "backfill_receipts": 0,
+            "backfill_error": None,
+        }
+    try:
+        return _sync_loyverse_locked(db, settings)
+    finally:
+        _release_sync_lock(db)
+
+
+def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
     started = datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)
 
