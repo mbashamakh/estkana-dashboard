@@ -41,6 +41,13 @@ DORMANT_NAMES = {"Alsamer 2", "NASEEM 3"}
 # Outlet (the duplicate rollup account, never a real cost center).
 OVERHEAD_ACCOUNTS_OF_INTEREST = ["CPU", "FIN", "GM", "HO", "HR", "MAINTINANACE", "Operation"]
 
+# Analytic accounts allocated into the P&L statement's "HO share" line (see
+# renderPnL in the frontend). Originally just "HO" — the user asked
+# (2026-08-27) for CPU folded into the same line too. The remaining overhead
+# accounts (FIN, GM, HR, Kaftrea, Maintenance, Operation) stay informational
+# only, in overhead_accounts/overhead.
+HO_SHARE_ACCOUNTS = ["HO", "CPU"]
+
 # Odoo branch display name -> Loyverse store name. Ambiguous mapping flagged:
 # Khomra -1/-2 were confirmed by the user (2026-08-16) as Al-Qurainiah /
 # Al-Ta'awun 2 respectively (matched by store-creation order — both outlets
@@ -229,14 +236,14 @@ def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
             "net": _round(r - c - o),
         })
 
-    # HO analytic account on its own — the ONE overhead cost center that gets
-    # allocated into the P&L statement's "HO share" line (see renderPnL in
-    # the frontend). The other overhead accounts are informational only.
+    # HO share — HO_SHARE_ACCOUNTS ("HO" + "CPU") combined, allocated into the
+    # P&L statement's "HO share" line (see renderPnL in the frontend). The
+    # other overhead accounts are informational only.
     ho_months = []
     for m in month_order:
-        r = rev_idx.get("HO", {}).get(m, 0)
-        c = cogs_idx.get("HO", {}).get(m, 0)
-        o = opex_idx.get("HO", {}).get(m, 0)
+        r = sum(rev_idx.get(n, {}).get(m, 0) for n in HO_SHARE_ACCOUNTS)
+        c = sum(cogs_idx.get(n, {}).get(m, 0) for n in HO_SHARE_ACCOUNTS)
+        o = sum(opex_idx.get(n, {}).get(m, 0) for n in HO_SHARE_ACCOUNTS)
         if r == 0 and c == 0 and o == 0:
             continue
         ho_months.append({"m": m, "revenue": _round(r), "cogs": _round(c), "opex": _round(o)})
@@ -268,7 +275,7 @@ def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
         "branch_rollup": {"months": branch_rollup_months, "ytd": ytd_from_months(branch_rollup_months)},
         "company_total": {"months": company_months, "ytd": ytd_from_months(company_months)},
         "overhead": {"months": overhead_months, "cost_centers": overhead_names},
-        "ho": {"months": ho_months, "cost_center": "[HO] HO"},
+        "ho": {"months": ho_months, "cost_center": "[HO] HO + [CPU] CPU"},
         "overhead_accounts": overhead_accounts,
         "cross_check_vs_outlet_umbrella_account": cross_check,
         "overhead_excluded_from_branch_rollup": sorted(OVERHEAD),

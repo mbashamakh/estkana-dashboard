@@ -61,11 +61,28 @@ def test_overhead_cost_centers_match(result, known_good):
 def test_ho_share_source_matches(result, known_good):
     """
     HO share in the dashboard is computed client-side as
-    -(pnlAggMonths(PNL.ho.months).net_profit) — assert the raw monthly figures
-    this depends on match exactly, since that's what actually reconciles to
-    Net Profit in the P&L statement.
+    -(pnlAggMonths(PNL.ho.months).net_profit). The user asked (2026-08-27) for
+    CPU to be folded into the same "HO share" line alongside HO, so
+    PNL.ho.months is now HO + CPU combined rather than HO alone —
+    known_good.json predates that change and still holds HO-only figures, so
+    reconstruct the expected combined series from known_good's HO and CPU
+    entries in overhead_accounts (which the port doesn't touch) instead of
+    comparing against known_good["ho"] directly.
     """
-    assert result["ho"]["months"] == known_good["ho"]["months"]
+    oh_by_name = {a["name"]: {m["m"]: m for m in a["months"]} for a in known_good["overhead_accounts"]}
+    ho_by_month = oh_by_name["HO"]
+    cpu_by_month = oh_by_name["CPU"]
+    all_months = sorted(set(ho_by_month) | set(cpu_by_month),
+                         key=lambda m: result["month_order"].index(m))
+    expected = []
+    for m in all_months:
+        h = ho_by_month.get(m, {"revenue": 0, "cogs": 0, "opex": 0})
+        c = cpu_by_month.get(m, {"revenue": 0, "cogs": 0, "opex": 0})
+        r, cg, o = h["revenue"] + c["revenue"], h["cogs"] + c["cogs"], h["opex"] + c["opex"]
+        if r == 0 and cg == 0 and o == 0:
+            continue
+        expected.append({"m": m, "revenue": round(r, 2), "cogs": round(cg, 2), "opex": round(o, 2)})
+    assert result["ho"]["months"] == expected
 
 
 def test_overhead_accounts_breakdown_matches(result, known_good):
@@ -107,9 +124,13 @@ def test_statement_reconciles_for_all_outlets(result):
     """
     Gross profit - opex - HO share must equal net profit, for the 'All
     Outlets' view — this is the exact invariant renderPnL() in the frontend
-    relies on. Pinned against the figure verified in the dashboard UI
-    screenshot during the P&L statement review (SAR 1,740,783 YTD): if this
-    drifts, either the source data changed or the allocation logic broke.
+    relies on. Originally pinned against SAR 1,740,783 YTD (verified in the
+    dashboard UI screenshot during the P&L statement review), back when "HO
+    share" meant the HO analytic account alone. The user asked (2026-08-27)
+    for CPU to be folded into the same "HO share" line, which pulls CPU's own
+    (substantial) opex into total_ho too — re-pinned to SAR 1,058,633, the
+    figure this fixture now produces with HO+CPU combined; if this drifts,
+    either the source data changed or the allocation logic broke.
     Uses valid_month_labels() derived from branch_rollup ONLY, then applies
     that same label set to both series — exactly like the frontend's
     PNL_VALID_MONTHS. Filtering HO by its own revenue instead (which is
@@ -124,4 +145,4 @@ def test_statement_reconciles_for_all_outlets(result):
     ho_ytd = ytd_from_months(filter_to_labels(result["ho"]["months"], labels))
     total_ho = -ho_ytd["net_profit"]
     net_profit = rollup_ytd["gross_profit"] - rollup_ytd["opex"] - total_ho
-    assert net_profit == pytest.approx(1_740_783, abs=1)
+    assert net_profit == pytest.approx(1_058_633, abs=1)
