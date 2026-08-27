@@ -439,7 +439,7 @@
       <div class="section-title" style="font-size:13px;">HQ / overhead cost centers — Opex</div>
       <div class="section-sub" id="pnlOverheadSub">Operating expenses only, by analytic account, for the selected period</div>
       <div class="chart-pos"><svg id="pnlOverheadChart" width="100%" viewBox="0 0 620 220"></svg><div class="tooltip" id="ttOverhead"></div></div>
-      <div class="note">HO and CPU are excluded here — they're already combined into the "HO share" line in the P&amp;L statement above, so showing them again in this breakdown would double them up. Kaftrea and the Outlet umbrella account are excluded too — Kaftrea wasn't part of the requested set, and Outlet is a duplicate rollup of the 18 branch totals.</div>
+      <div class="note">HO and CPU are excluded here — they're already broken out as their own "HO share" and "CPU share" lines in the P&amp;L statement above, so showing them again in this breakdown would double them up. Kaftrea and the Outlet umbrella account are excluded too — Kaftrea wasn't part of the requested set, and Outlet is a duplicate rollup of the 18 branch totals.</div>
     </div>
 
     <div class="card" style="margin-top:16px;">
@@ -1078,15 +1078,18 @@ function renderPnL() {
   });
 
   // Statement table — driven by the Outlet selector (independent of Scope, which only
-  // drives the KPI strip / compare table above). "All Outlets" shows the full HO total;
-  // a single outlet shows its own P&L plus its allocated slice of HO share, split by
+  // drives the KPI strip / compare table above). "All Outlets" shows the full HO and CPU
+  // totals; a single outlet shows its own P&L plus its allocated slice of each, split by
   // that outlet's share of total company revenue.
   const periodLabelText = pnlState.period==="ytd" ? "Year to date" : PNL_VALID_MONTHS[parseInt(pnlState.period,10)].m;
-  // HO share comes from the "[HO] HO" + "[CPU] CPU" analytic accounts combined — not the
-  // other overhead cost centers (FIN, GM, HR, Kaftrea, Maintenance, Operation), which are
+  // HO share and CPU share are each their own line, sourced from the "[HO] HO" and
+  // "[CPU] CPU" analytic accounts respectively — not merged together, and not the other
+  // overhead cost centers (FIN, GM, HR, Kaftrea, Maintenance, Operation), which are
   // separate departments and excluded here.
   const hoAgg = pnlAggMonths(PNL.ho.months, labels);
   const totalHO = -hoAgg.net_profit; // HO's own opex, net of any revenue posted to that account
+  const cpuAgg = pnlAggMonths(PNL.cpu.months, labels);
+  const totalCPU = -cpuAgg.net_profit; // CPU's own opex, net of any revenue posted to that account
   let stmtAgg, contributionPct, stmtLabel;
   if (pnlState.outlet === "all") {
     stmtAgg = rollupAgg;
@@ -1099,7 +1102,8 @@ function renderPnL() {
     stmtLabel = `${branch.odoo_name} (${branch.loyverse_name})`;
   }
   const hoShare = totalHO * contributionPct / 100;
-  const stmtNetProfit = stmtAgg.gross_profit - stmtAgg.opex - hoShare;
+  const cpuShare = totalCPU * contributionPct / 100;
+  const stmtNetProfit = stmtAgg.gross_profit - stmtAgg.opex - hoShare - cpuShare;
   const stmtNetMarginPct = stmtAgg.revenue ? stmtNetProfit/stmtAgg.revenue*100 : null;
 
   document.getElementById("pnlStatementSub").textContent = stmtLabel + " · " + periodLabelText;
@@ -1109,8 +1113,11 @@ function renderPnL() {
     {label:"Gross profit", value: stmtAgg.gross_profit, total:true, sub: pnlPct(stmtAgg.gross_margin_pct)+" gross margin"},
     {label:"Operating expenses", value: -stmtAgg.opex},
     {label:"HO share", value: -hoShare, sub: pnlState.outlet === "all"
-      ? "From the HO + CPU analytic accounts (excludes FIN, GM, HR, Kaftrea, Maintenance, Operation)"
-      : `${contributionPct.toFixed(1)}% of HO+CPU account cost — this outlet's share of company revenue`},
+      ? "From the HO analytic account only (excludes CPU and other overhead)"
+      : `${contributionPct.toFixed(1)}% of HO account cost — this outlet's share of company revenue`},
+    {label:"CPU share", value: -cpuShare, sub: pnlState.outlet === "all"
+      ? "From the CPU analytic account only (excludes HO and other overhead)"
+      : `${contributionPct.toFixed(1)}% of CPU account cost — this outlet's share of company revenue`},
     {label:"Net profit", value: stmtNetProfit, total:true, sub: pnlPct(stmtNetMarginPct)+" net margin"},
   ];
   document.getElementById("pnlStatementTable").innerHTML = rows.map(r => `
@@ -1149,8 +1156,8 @@ function renderPnL() {
     </tr>`).join("");
 
   // HQ / overhead cost centers — Opex only, donut chart (HO and CPU excluded — they're
-  // already combined into the "HO share" line in the P&L statement above, showing them
-  // here too would double it up).
+  // already their own "HO share" / "CPU share" lines in the P&L statement above, showing
+  // them here too would double them up).
   const OH_COLORS = ["var(--series-1)","var(--series-2)","var(--series-3)","var(--series-4)","var(--series-5)","var(--series-6)"];
   const ohRows = PNL.overhead_accounts.filter(a => a.name !== "HO" && a.name !== "CPU")
     .map((a,i) => ({ a, agg: pnlAggMonths(a.months, labels), color: OH_COLORS[i % OH_COLORS.length] }))

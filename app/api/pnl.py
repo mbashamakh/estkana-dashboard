@@ -97,6 +97,7 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         for name in OVERHEAD_ACCOUNTS_OF_INTEREST
     ]
     ho_months = next((a["months"] for a in overhead_accounts if a["name"] == "HO"), [])
+    cpu_months = next((a["months"] for a in overhead_accounts if a["name"] == "CPU"), [])
 
     overhead_months = [_month_row_from_db(r) for r in overhead_total_rows]
 
@@ -129,6 +130,7 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         "company_total": {"months": company_months, "ytd": ytd_from_months(company_months)},
         "overhead": {"months": overhead_months},
         "ho": {"months": ho_months, "cost_center": "[HO] HO"},
+        "cpu": {"months": cpu_months, "cost_center": "[CPU] CPU"},
         "overhead_accounts": overhead_accounts,
         "overhead_excluded_from_branch_rollup": sorted(OVERHEAD),
         "dormant_excluded_from_branch_rollup": sorted(DORMANT_NAMES),
