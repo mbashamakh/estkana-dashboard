@@ -33,7 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import LoyverseDaily
+from app.db.models import AnalyticMonthly, LoyverseDaily
 from app.etl.loyverse_pnl import LOYVERSE_TEST_BRANCHES
 from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
 from app.etl.odoo_pnl import LOYVERSE_MAP  # odoo_name -> Loyverse-style display name
@@ -128,6 +128,53 @@ def _available_months(rows: list[LoyverseDaily], year: int, today: date) -> list
     return months
 
 
+def _branch_month_cost_fields(
+    *, is_real: bool, odoo_row, sample_food_cost_pct: float, labor_cost_pct: float,
+    sales: float, discount_amt: float,
+) -> dict:
+    """
+    Pure (no DB/session dependency, so it's fast to unit-test — see
+    tests/test_data_builder.py) per-branch-month Actual Cost % / Gross
+    Profit / Gross Margin % / Contribution. Real Odoo COGS ÷ revenue when
+    Odoo has posted a complete month for this branch (see
+    AnalyticMonthly.is_complete) via `odoo_row`, else the flat per-branch
+    sample percentage as a fallback — replacing what used to be a single
+    constant sample percentage for every month regardless of period.
+
+    `odoo_row` just needs `.is_complete`, `.revenue`, `.cogs` attributes
+    (an AnalyticMonthly instance in production; any duck-typed object with
+    those three in tests) — pass None when there's no Odoo row to check
+    (non-real/sample branches never have one; is_real branches pass None
+    when Odoo simply hasn't synced that (branch, month) yet).
+
+    Gross profit/contribution are computed from REAL Loyverse `sales`, not
+    a disconnected canned sample figure unrelated to this branch's actual
+    sales scale — but only when `is_real` (this branch actually has real
+    Loyverse sales to multiply against). labor_cost_pct is always the
+    sample percentage (Odoo has no per-branch labor/payroll breakdown wired
+    up yet), so contribution is never fully real, even when the cost %
+    underneath gross profit is.
+    """
+    if odoo_row is not None and odoo_row.is_complete and odoo_row.revenue:
+        food_cost_pct = round(odoo_row.cogs / odoo_row.revenue * 100, 2)
+        food_cost_pct_is_real = True
+    else:
+        food_cost_pct = sample_food_cost_pct
+        food_cost_pct_is_real = False
+    gross_margin_pct = round(100 - food_cost_pct, 2)
+
+    fields = {
+        "food_cost_pct": food_cost_pct,
+        "food_cost_pct_is_real": food_cost_pct_is_real,
+        "gross_margin_pct": gross_margin_pct,
+    }
+    if is_real:
+        gross_profit = round(sales * gross_margin_pct / 100, 2)
+        fields["gross_profit"] = gross_profit
+        fields["contribution"] = round(gross_profit - sales * labor_cost_pct / 100 - discount_amt * 0.5, 2)
+    return fields
+
+
 def build_data_response(db: Session) -> dict:
     sample = _load_sample()
     sample_by_name = {b["name"]: b for b in sample["branches"]}
@@ -141,6 +188,17 @@ def build_data_response(db: Session) -> dict:
             odoo_name_to_sample[odoo_name] = sample_by_name[loy_name]
 
     avg = _sample_averages(sample)
+
+    # Real Odoo revenue/COGS per (branch, month), keyed the same way
+    # odoo_pnl.py/AnalyticMonthly already store it — lets Actual Cost %,
+    # Gross Profit, and Gross Margin % below use real Odoo data wherever
+    # it's been posted, instead of the flat per-branch sample percentage,
+    # falling back to that sample percentage only for months Odoo hasn't
+    # posted revenue for yet (see AnalyticMonthly.is_complete's docstring).
+    odoo_branch_month: dict[tuple[str, str], AnalyticMonthly] = {
+        (row.name, row.month): row
+        for row in db.scalars(select(AnalyticMonthly).where(AnalyticMonthly.kind == "branch")).all()
+    }
 
     rows = db.scalars(
         select(LoyverseDaily).where(LoyverseDaily.branch.in_(REAL_BRANCH_NAMES)).order_by(LoyverseDaily.date)
@@ -205,6 +263,8 @@ def build_data_response(db: Session) -> dict:
             key=lambda x: -x["sales"],
         )[:20]
 
+        scalars = {f: (sample_b[f] if sample_b else avg["scalars"][f]) for f in _SAMPLE_ONLY_SCALAR_FIELDS}
+
         monthly_rows = []
         for position, (mi, label, _s, _e, _partial) in enumerate(months, start=1):
             # `mi` here is the true calendar month (1-12) -- needed to look
@@ -228,16 +288,24 @@ def build_data_response(db: Session) -> dict:
                 if sample_b and mi - 1 < len(sample_b["monthly"])
                 else avg["monthly"].get(mi, {f: 0.0 for f in _SAMPLE_ONLY_MONTHLY_FIELDS})
             )
-            monthly_rows.append({
+
+            odoo_row = odoo_branch_month.get((odoo_name, label)) if is_real else None
+            cost_fields = _branch_month_cost_fields(
+                is_real=is_real, odoo_row=odoo_row,
+                sample_food_cost_pct=scalars["food_cost_pct"], labor_cost_pct=scalars["labor_cost_pct"],
+                sales=real_part["sales"], discount_amt=real_part["discount_amt"],
+            )
+
+            month_row = {
                 "mi": position, "m": label,
                 "sales": real_part["sales"], "sales_prev": None,
                 "orders": real_part["orders"],
                 "discount_amt": real_part["discount_amt"], "refund_amt": real_part["refund_amt"],
                 "refund_orders": 0,
                 **sample_part,
-            })
-
-        scalars = {f: (sample_b[f] if sample_b else avg["scalars"][f]) for f in _SAMPLE_ONLY_SCALAR_FIELDS}
+                **cost_fields,
+            }
+            monthly_rows.append(month_row)
 
         branches_out.append({
             "id": _slugify(odoo_name),

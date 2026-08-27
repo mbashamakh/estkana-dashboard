@@ -569,12 +569,25 @@ function selectedBranches() {
 function sum(arr) { return arr.reduce((a,b)=>a+b,0); }
 
 // Sum a branch's monthly line items across a set of month indices.
+// food_cost_pct is a percentage, not a summable amount — each month now
+// carries its own value (real Odoo COGS/revenue where Odoo has posted that
+// month, else the branch's flat sample percentage — see data_builder.py),
+// so it's aggregated as a sales-weighted average across the selected
+// months instead, alongside real_cost_sales (how much of that weighted
+// sales figure came from a real Odoo month, vs. the sample fallback) so
+// callers can tell how much of the result to trust as real.
 function branchMonthlyAgg(b, monthIndices) {
   const idxSet = new Set(monthIndices);
   const rows = b.monthly.filter(m => idxSet.has(m.mi));
   const out = { sales:0, orders:0, target:0, discount_amt:0, refund_amt:0, refund_orders:0,
-                waste_value:0, complaints:0, gross_profit:0, contribution:0 };
-  rows.forEach(r => { Object.keys(out).forEach(k => out[k]+=r[k]); });
+                waste_value:0, complaints:0, gross_profit:0, contribution:0, real_cost_sales:0 };
+  let costWeighted = 0;
+  rows.forEach(r => {
+    Object.keys(out).forEach(k => { if (k !== "real_cost_sales") out[k]+=r[k]; });
+    costWeighted += (r.food_cost_pct||0) * r.sales;
+    if (r.food_cost_pct_is_real) out.real_cost_sales += r.sales;
+  });
+  out.food_cost_pct = out.sales ? costWeighted/out.sales : (b.food_cost_pct||0);
   return out;
 }
 function computeAgg(branches, period) {
@@ -626,7 +639,13 @@ function computeAgg(branches, period) {
   function wavgKey(key) {
     return sales ? sum(perBranch.map(x => x.b[key]*x.agg.sales)) / sales : 0;
   }
-  const food_cost_pct = wavgKey("food_cost_pct");
+  // food_cost_pct is weighted from each branch's already period-weighted
+  // agg.food_cost_pct (real Odoo COGS/revenue where posted, sample
+  // fallback elsewhere — see branchMonthlyAgg), NOT the flat per-branch
+  // scalar wavgKey uses for the fields that are still 100% sample below.
+  const food_cost_pct = sales ? sum(perBranch.map(x => x.agg.food_cost_pct*x.agg.sales)) / sales : 0;
+  const food_cost_real_sales = sum(perBranch.map(x => x.agg.real_cost_sales));
+  const food_cost_real_frac = sales ? food_cost_real_sales/sales : 0;
   const standard_cost_pct = wavgKey("standard_cost_pct");
   const labor_cost_pct = wavgKey("labor_cost_pct");
   const waste_pct = wavgKey("waste_pct");
@@ -666,7 +685,7 @@ function computeAgg(branches, period) {
   wasteBreakdown.forEach(wr => wr.value = Math.round(wr.value));
 
   return { daily, dailyPrev, sales, salesPrev, dailyPrevMonth, salesPrevMonth, dailyLastYear, salesLastYear,
-    orders, target, aov, food_cost_pct, standard_cost_pct, labor_cost_pct,
+    orders, target, aov, food_cost_pct, food_cost_real_frac, standard_cost_pct, labor_cost_pct,
     waste_pct, discount_pct, refund_pct, inv_variance_pct, rating, gross_margin_pct, gross_profit,
     contribution, categories, items, discount_amt, refund_amt, refund_orders, waste_value, wasteBreakdown,
     complaints, n_branches: branches.length, monthIndices, dayRange: [dS,dE] };
@@ -763,6 +782,27 @@ function renderOutletDropdown() {
   });
 })();
 
+// ---------------- Render: cost-data source labels ----------------
+// food_cost_real_frac is the share of period sales whose Actual Cost %
+// (and everything derived from it — Gross Profit, Gross Margin %) came from
+// real, posted Odoo COGS/revenue rather than the flat per-branch sample
+// percentage (see data_builder.py / branchMonthlyAgg). Odoo posts revenue
+// and COGS with a lag, so the current/most-recent month is often still
+// sample here even once earlier months have gone real.
+function costSourceTag(frac) {
+  if (frac >= 0.999) return "Odoo (real)";
+  if (frac > 0.001) return "Odoo (partial — some outlets/months not yet posted in Odoo, sample used as fallback)";
+  return "Odoo (sample — see P&L section for real data)";
+}
+// Net Profit / Outlet Profit always mix in labor_cost_pct, which stays
+// sample regardless (Odoo has no per-branch labor/payroll breakdown wired
+// up) — so it's never fully "real" even when the cost % underneath it is.
+function contributionSourceTag(frac) {
+  return frac > 0.001
+    ? "Odoo actual cost" + (frac >= 0.999 ? "" : " (partial)") + " + sample labor %"
+    : "Odoo (sample — see P&L section for real data)";
+}
+
 // ---------------- Render: KPI cards ----------------
 function renderKPIs(agg) {
   const grid = document.getElementById("kpiGrid");
@@ -773,8 +813,8 @@ function renderKPIs(agg) {
       delta: hasPrev ? `${salesDelta>=0?'↑':'↓'} ${Math.abs(salesDelta).toFixed(1)}% vs ${comparisonLabel()}` : null, dir: hasPrev && salesDelta>=0?"up":"down", accent:"var(--series-1)", source:"Loyverse" },
     { label: "Number of Orders", value: agg.orders.toLocaleString(), sub: "orders in period", accent:"var(--series-3)", source:"Loyverse" },
     { label: "Average Order Value", value: fmtSAR(agg.aov), sub: "Total sales ÷ orders", accent:"var(--series-4)", source:"Loyverse" },
-    { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:"Odoo (sample — see P&L section for real data)" },
-    { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs", accent:"var(--series-2)", source:"Odoo (sample — see P&L section for real data)" },
+    { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:costSourceTag(agg.food_cost_real_frac) },
+    { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs", accent:"var(--series-2)", source:contributionSourceTag(agg.food_cost_real_frac) },
   ];
   grid.innerHTML = "";
   cards.forEach(c => {
@@ -890,12 +930,13 @@ function renderCostGrid(agg) {
   const variance = agg.food_cost_pct - agg.standard_cost_pct;
   const fc = statusOf(agg.food_cost_pct, agg.standard_cost_pct, "lte", 1.5);
   const lc = statusOf(agg.labor_cost_pct, 20, "lte", 2);
+  const costSource = costSourceTag(agg.food_cost_real_frac);
   const items = [
     {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"Excel (sample — not yet connected)"},
-    {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:"Odoo (sample — see P&L section for real data)"},
-    {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Odoo (sample — see P&L section for real data)"},
-    {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:"Odoo (sample — see P&L section for real data)"},
-    {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:"Odoo (sample — see P&L section for real data)"},
+    {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:costSource},
+    {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Sample — no Odoo labor/payroll account mapped yet"},
+    {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:costSource},
+    {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:costSource},
   ];
   grid.innerHTML = "";
   items.forEach(it => {
@@ -908,7 +949,8 @@ function renderCostGrid(agg) {
   });
   grid.innerHTML += `<div class="mini-stat" style="grid-column:1/-1; border-top:1px solid var(--border); padding-top:10px; margin-top:2px;">
     <div class="mlabel">Outlet Profit / Contribution</div><div class="mvalue">${fmtSAR(agg.contribution,true)}</div>
-    <div class="msub">Sales after actual cost, labor cost, and half of discounts</div></div>`;
+    <div class="msub">Sales after actual cost, labor cost, and half of discounts</div>
+    <div class="source-tag">via ${contributionSourceTag(agg.food_cost_real_frac)}</div></div>`;
 }
 
 // ---------------- Render: Traffic light table ----------------
@@ -935,7 +977,10 @@ function renderRanking(period) {
   const monthIndices = monthIndicesFor(period);
   const scored = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices) }));
   const ranked = [...scored].sort((a,c)=>c.agg.contribution-a.agg.contribution);
-  const avgFoodCost = sum(branches.map(b=>b.food_cost_pct))/branches.length;
+  // Period-weighted, real-Odoo-where-posted food cost % (agg.food_cost_pct
+  // from branchMonthlyAgg) — not the flat all-time branch scalar, which
+  // ignored both the selected period and any real Odoo data.
+  const avgFoodCost = sum(scored.map(x=>x.agg.food_cost_pct))/scored.length;
   const salesRanked = [...scored].sort((a,c)=>c.agg.sales-a.agg.sales);
   const salesRankOf = id => salesRanked.findIndex(x=>x.b.id===id);
 
@@ -945,17 +990,17 @@ function renderRanking(period) {
     const flags = [];
     if (rank === 1) flags.push(`<span class="flag good">★ Top performer</span>`);
     if (rank === ranked.length) flags.push(`<span class="flag critical">⚠ Needs attention</span>`);
-    if (b.food_cost_pct > avgFoodCost + 2) flags.push(`<span class="flag warning">High food cost</span>`);
+    if (agg.food_cost_pct > avgFoodCost + 2) flags.push(`<span class="flag warning">High food cost</span>`);
     const salesRank = salesRankOf(b.id);
     if (salesRank < branches.length/2 && rank > branches.length/2) flags.push(`<span class="flag warning">High sales, low profit</span>`);
 
     const badgeClass = rank===1 ? "r1" : rank===ranked.length ? "rlast" : "rmid";
-    const fcColor = b.food_cost_pct > avgFoodCost+2 ? "var(--critical)" : "var(--text-primary)";
+    const fcColor = agg.food_cost_pct > avgFoodCost+2 ? "var(--critical)" : "var(--text-primary)";
     return `<tr>
       <td><span class="rank-badge ${badgeClass}">${rank}</span></td>
       <td>${b.name}<div style="font-size:10.5px;color:var(--text-muted)">${b.region}</div></td>
       <td class="num">${fmtSAR(agg.sales,true)}</td>
-      <td class="num" style="color:${fcColor};">${pct(b.food_cost_pct)}</td>
+      <td class="num" style="color:${fcColor};">${pct(agg.food_cost_pct)}</td>
       <td class="num" style="font-weight:650;">${fmtSAR(agg.contribution,true)}</td>
       <td>${flags.join("") || "—"}</td>
     </tr>`;
