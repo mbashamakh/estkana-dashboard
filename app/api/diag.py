@@ -49,6 +49,40 @@ def diag_sync_now(secret: str):
         db.close()
 
 
+@router.get("/api/_diag/odoo-query")
+def diag_odoo_query(secret: str, model: str, domain: str, fields: str, limit: int = 200, offset: int = 0, order: str = ""):
+    """
+    Read-only ad-hoc query: search_read(model, domain, fields, limit, offset,
+    order). `domain` and `fields` are JSON-encoded strings (e.g.
+    domain=[["account_id.code","=","51102000"],["date",">=","2026-08-01"]],
+    fields=["id","date","name","quantity"]) so this can answer one-off
+    reconnaissance questions (the GL-51102000-attachment-quantity
+    investigation) without a new purpose-built endpoint + deploy each time.
+    Read-only by construction (search_read only) and still DIAG_SECRET-gated
+    like every other endpoint here -- same "temporary, delete once verified"
+    status as the rest of this file.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    import json as _json
+
+    settings = get_settings()
+    try:
+        domain_parsed = _json.loads(domain)
+        fields_parsed = _json.loads(fields)
+        uid = _authenticate(settings)
+        kwargs = {"fields": fields_parsed, "limit": limit, "offset": offset}
+        if order:
+            kwargs["order"] = order
+        rows = _execute_kw(settings, uid, model, "search_read", [domain_parsed], kwargs)
+        count = _execute_kw(settings, uid, model, "search_count", [domain_parsed])
+        return {"ok": True, "total_count": count, "returned": len(rows), "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/_diag/odoo-fields")
 def diag_odoo_fields(secret: str, model: str = "account.analytic.line", search: str = ""):
     """
