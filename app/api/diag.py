@@ -278,6 +278,127 @@ def diag_loyverse_agg(secret: str, days: int = 2):
         return {"ok": False, "error": str(exc)}
 
 
+@router.get("/api/_diag/loyverse-items-by-branch")
+def diag_loyverse_items_by_branch(secret: str, branch: str, date_min: str, date_max: str):
+    """
+    Item-level sales for ONE branch over a date range — built for the
+    Est-010 (Forosia) sale-consumption request: qty sold (net of refunds)
+    + gross sales per menu item, so it can be multiplied against the
+    recipe/cost sheet's per-item cost to get theoretical ingredient
+    consumption and compared against actual GL 51102000 purchases.
+
+    `branch` matches an odoo_name value in STORE_ID_TO_ODOO_NAME (e.g.
+    "FOROSIA"). `date_min`/`date_max` are ISO 8601 strings passed straight
+    through as Loyverse's created_at_min/created_at_max (e.g.
+    date_min=2026-08-01T00:00:00.000Z, date_max=2026-09-01T00:00:00.000Z).
+
+    Same exclusion rules as loyverse_pnl.aggregate_receipts (cancelled
+    receipts skipped, refunds netted out) but aggregated by item across the
+    whole window rather than per-day, since this only needs a period total.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from collections import defaultdict
+
+    from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
+
+    store_ids = [sid for sid, name in STORE_ID_TO_ODOO_NAME.items() if name == branch]
+    if not store_ids:
+        return {
+            "ok": False,
+            "error": f"Unknown branch {branch!r}. Known: {sorted(set(STORE_ID_TO_ODOO_NAME.values()))}",
+        }
+    store_id = store_ids[0]
+
+    settings = get_settings()
+    try:
+        receipts = loyverse_client.list_all_receipts(
+            settings, created_at_min=date_min, created_at_max=date_max, store_id=store_id,
+        )
+        items = loyverse_client.list_all_items(settings)
+        item_category = build_item_category_lookup(items)
+
+        item_totals: dict[str, dict] = defaultdict(lambda: {
+            "cat": "Other", "qty": 0.0, "sales": 0.0, "refund_qty": 0.0, "refund_sales": 0.0,
+        })
+        sale_receipt_count = 0
+        refund_receipt_count = 0
+        cancelled_count = 0
+        skipped_other_store = 0
+        total_sales_net = 0.0
+        total_discount = 0.0
+        total_refund = 0.0
+
+        for r in receipts:
+            if r.get("cancelled_at"):
+                cancelled_count += 1
+                continue
+            if r.get("store_id") != store_id:
+                # Defensive — store_id is already server-side filtered, but
+                # don't silently trust that if the API ever changes.
+                skipped_other_store += 1
+                continue
+
+            is_refund = r.get("receipt_type") == "REFUND"
+            amount = r.get("total_money") or 0.0
+
+            if is_refund:
+                refund_receipt_count += 1
+                total_refund += amount
+                total_sales_net -= amount
+                for li in r.get("line_items", []):
+                    name = li.get("item_name") or "(unnamed item)"
+                    entry = item_totals[name]
+                    entry["cat"] = item_category.get(li.get("item_id"), entry["cat"])
+                    entry["refund_qty"] += li.get("quantity") or 0.0
+                    entry["refund_sales"] += li.get("total_money") or 0.0
+            else:
+                sale_receipt_count += 1
+                total_sales_net += amount
+                total_discount += r.get("total_discount") or 0.0
+                for li in r.get("line_items", []):
+                    name = li.get("item_name") or "(unnamed item)"
+                    entry = item_totals[name]
+                    entry["cat"] = item_category.get(li.get("item_id"), entry["cat"])
+                    entry["qty"] += li.get("quantity") or 0.0
+                    entry["sales"] += li.get("total_money") or 0.0
+
+        items_out = []
+        for name, v in item_totals.items():
+            items_out.append({
+                "item_name": name,
+                "category": v["cat"],
+                "qty_sold": round(v["qty"], 3),
+                "sales": round(v["sales"], 2),
+                "qty_refunded": round(v["refund_qty"], 3),
+                "sales_refunded": round(v["refund_sales"], 2),
+                "net_qty": round(v["qty"] - v["refund_qty"], 3),
+                "net_sales": round(v["sales"] - v["refund_sales"], 2),
+            })
+        items_out.sort(key=lambda x: -x["net_sales"])
+
+        return {
+            "ok": True,
+            "branch": branch,
+            "store_id": store_id,
+            "window": {"from": date_min, "to": date_max},
+            "raw_receipt_count": len(receipts),
+            "sale_receipt_count": sale_receipt_count,
+            "refund_receipt_count": refund_receipt_count,
+            "cancelled_receipt_count": cancelled_count,
+            "skipped_other_store_receipts": skipped_other_store,
+            "total_sales_net": round(total_sales_net, 2),
+            "total_discount": round(total_discount, 2),
+            "total_refund": round(total_refund, 2),
+            "item_count": len(items_out),
+            "items": items_out,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/_diag/odoo-dblist")
 def diag_odoo_dblist(secret: str):
     """
