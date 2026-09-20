@@ -97,24 +97,48 @@ def _upsert_day(db: Session, branch: str, date: str, day_data: dict) -> None:
     db.execute(stmt)
 
 
-def _pull_and_upsert_window(db: Session, settings: Settings, created_at_min: str, created_at_max: str) -> int:
-    """Returns the number of raw receipts processed (for logging)."""
+def _pull_and_upsert_window(
+    db: Session, settings: Settings, created_at_min: str, created_at_max: str, only_date: str | None = None,
+) -> int:
+    """Returns the number of raw receipts processed (for logging).
+
+    If `only_date` (YYYY-MM-DD) is given, ONLY that date's aggregated bucket
+    is upserted -- any other date found in the aggregation is dropped, not
+    written. This matters because this window is a `created_at` (sync time)
+    filter, but aggregate_receipts buckets each receipt by its `receipt_date`
+    (actual transaction time) -- see loyverse_pnl.py's _day() docstring. A
+    receipt's created_at can fall inside this window while its receipt_date
+    lands on the adjacent calendar day, so the aggregation can legitimately
+    produce a second, unrelated date bucket containing only that handful of
+    stray receipts -- a tiny, incomplete slice of that other day, not a real
+    total for it. _upsert_day() REPLACES a day's row outright, so writing
+    that stray bucket would silently overwrite the adjacent day's true,
+    complete total with a near-empty one. Restricting to `only_date` makes
+    every call site safe on its own, instead of relying on caller-side
+    ordering (e.g. "pull yesterday last", see _sync_loyverse_locked's
+    docstring) to self-heal it after the fact -- the loyverse-resync-range
+    diag endpoint had no such ordering and let this exact spillover silently
+    corrupt the day before whatever range was requested."""
     receipts = loyverse_client.list_all_receipts(settings, created_at_min, created_at_max)
     items = loyverse_client.list_all_items(settings)
     item_category = build_item_category_lookup(items)
     agg = aggregate_receipts(receipts, item_category)
     for branch, days in agg["branches"].items():
         for date, day_data in days.items():
+            if only_date is not None and date != only_date:
+                continue
             _upsert_day(db, branch, date, day_data)
     return len(receipts)
 
 
 def _pull_and_upsert_full_day(db: Session, settings: Settings, day: datetime) -> int:
     """Like _pull_and_upsert_window, but for one whole calendar day
-    (day 00:00 -> day+1 00:00), regardless of what time `day` itself is."""
+    (day 00:00 -> day+1 00:00), regardless of what time `day` itself is.
+    Restricted to `day` itself -- see _pull_and_upsert_window's `only_date`
+    docstring for why."""
     day_min = _iso(day.replace(hour=0, minute=0, second=0, microsecond=0))
     day_max = _iso((day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
-    return _pull_and_upsert_window(db, settings, day_min, day_max)
+    return _pull_and_upsert_window(db, settings, day_min, day_max, only_date=day.strftime("%Y-%m-%d"))
 
 
 def _earliest_synced_date(db: Session) -> str | None:
@@ -251,7 +275,7 @@ def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
             day_label = backfill_day.strftime("%Y-%m-%d")
             day_min = _iso(backfill_day.replace(hour=0, minute=0, second=0, microsecond=0))
             day_max = _iso((backfill_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
-            count = _pull_and_upsert_window(db, settings, day_min, day_max)
+            count = _pull_and_upsert_window(db, settings, day_min, day_max, only_date=day_label)
             # Cursor only ever advances on a deliberate, completed pull of
             # exactly this day -- never inferred from what a stray
             # cross-midnight receipt happened to already leave in the
