@@ -54,6 +54,32 @@ def _iso(dt: datetime) -> str:
 
 
 def _upsert_day(db: Session, branch: str, date: str, day_data: dict) -> None:
+    # Regression guard: this REPLACE is exactly the mechanical property
+    # that let the original spillover-cursor bug (8ded1e3), the shrinking
+    # incremental window (b92040e), the hourly/manual sync race (ef530af),
+    # and an untracked manual recovery attempt all silently overwrite an
+    # already-correct day with a near-zero one, with no record left behind
+    # afterward. This doesn't block the write (a day CAN legitimately go
+    # from a normal volume to near-zero, and a blocked write would leave
+    # the backfill cursor permanently unable to move past a genuinely
+    # quiet day) -- it just makes sure a large, silent collapse always
+    # leaves a SyncLog trace, which is the exact audit trail that was
+    # missing every previous time this happened.
+    existing_orders = db.scalar(
+        select(LoyverseDaily.orders).where(LoyverseDaily.branch == branch, LoyverseDaily.date == date)
+    )
+    new_orders = day_data["orders"]
+    if existing_orders is not None and existing_orders > 20 and new_orders < existing_orders * 0.5:
+        db.add(SyncLog(
+            source="loyverse", success=True,
+            message=(
+                f"WARNING: {branch}/{date} orders would drop from {existing_orders} to {new_orders} "
+                "(>50% collapse) -- writing the new value anyway, but flagging for review since this "
+                "is exactly the signature of a partial/bad pull overwriting a previously-good day."
+            )[:2000],
+            started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc),
+        ))
+
     stmt = pg_insert(LoyverseDaily).values(
         branch=branch, date=date,
         sales=day_data["sales"], orders=day_data["orders"],
