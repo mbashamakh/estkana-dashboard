@@ -678,3 +678,97 @@ def diag_loyverse_rewind_cursor(secret: str, to_date: str):
         return {"ok": True, "cursor_before": before_value, "cursor_after": to_date}
     finally:
         db.close()
+
+
+@router.get("/api/_diag/loyverse-resync-range")
+def diag_loyverse_resync_range(secret: str, date_from: str, date_to: str):
+    """
+    Force a full, deliberate re-pull + upsert of EVERY branch's data for
+    each calendar day in [date_from, date_to] (inclusive), no matter what's
+    currently stored for those days.
+
+    Built to fix a confirmed real-world gap: loyverse_daily rows for
+    2026-08-24..2026-08-31 ended up scattered between correct values and
+    near-zero/missing ones on a per-branch, per-day basis (e.g. FOROSIA
+    near-zero every day that week, other branches only near-zero on SOME
+    of those days, SHARKIA missing entirely on 2026-08-29 and 2026-08-31).
+    Traced via loyverse-debug's row updated_at timestamps to a manual
+    recovery attempt made around 2026-08-26/27 -- most likely repeated
+    loyverse-rewind-cursor + loyverse-sync-now calls, landing on top of
+    the original spillover-cursor bug (see 8ded1e3/b92040e) which was
+    still live for part of that window before its fix actually deployed
+    (the cron's redeploy itself lagged its commit by almost a full day).
+
+    Unlike loyverse-rewind-cursor -- which only nudges a single GLOBAL
+    cursor and relies on the hourly cron's bounded backfill loop to
+    eventually walk back over the target range, with no record of what
+    ran or why -- this pulls exactly the requested days directly and
+    synchronously, and always writes a SyncLog entry, so a future "why did
+    this day's numbers change" question has a real answer.
+
+    Reuses the same per-day full-window pull (_pull_and_upsert_full_day)
+    the hourly cron uses for today/yesterday, under the same advisory
+    lock, so this can never race with it and can't reintroduce the
+    original "partial window" class of bug. Upserts are idempotent
+    REPLACEs, so re-running this over already-correct days is harmless --
+    capped at 31 days per call so one bad call can't accidentally rewrite
+    a huge swath of history.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from datetime import datetime, timedelta, timezone
+
+    from app.etl.run_loyverse_sync import _pull_and_upsert_full_day, _release_sync_lock, _try_acquire_sync_lock
+
+    try:
+        start = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        return {"ok": False, "error": f"date_from/date_to must be YYYY-MM-DD: {exc}"}
+    if end < start:
+        return {"ok": False, "error": "date_to must be on or after date_from"}
+    if (end - start).days > 31:
+        return {"ok": False, "error": "range too large for one call (max 31 days) -- call again in chunks"}
+
+    settings = get_settings()
+    db = SessionLocal()
+    started = datetime.now(timezone.utc)
+    if not _try_acquire_sync_lock(db):
+        db.close()
+        return {"ok": False, "error": "another loyverse sync is currently in progress -- try again shortly"}
+
+    resynced: list[dict] = []
+    error = None
+    try:
+        day = start
+        while day <= end:
+            try:
+                count = _pull_and_upsert_full_day(db, settings, day)
+                db.commit()
+                resynced.append({"date": day.strftime("%Y-%m-%d"), "receipts": count})
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                error = f"{day.strftime('%Y-%m-%d')}: {exc}"
+                break
+            day += timedelta(days=1)
+
+        success = error is None
+        message = (
+            f"manual resync-range {date_from}..{date_to}: "
+            + (
+                f"{len(resynced)} day(s) done, {sum(r['receipts'] for r in resynced)} receipts"
+                if resynced else "0 days done"
+            )
+            + (f" (FAILED at {error})" if error else "")
+        )
+        db.add(SyncLog(
+            source="loyverse", success=success, message=message[:2000],
+            started_at=started, finished_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+        return {"ok": success, "resynced": resynced, "error": error}
+    finally:
+        _release_sync_lock(db)
+        db.close()
