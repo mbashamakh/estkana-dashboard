@@ -19,9 +19,9 @@ import os
 import bcrypt
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.api.data import router as data_router
 from app.api.health import router as health_router
@@ -77,6 +77,18 @@ def on_startup() -> None:
 
 @app.get("/api/health")
 def health():
+    # Actually checks DB connectivity (not just "the process is up") so
+    # Render's own health check -- set this route as its healthCheckPath
+    # in the service settings -- can catch and auto-restart on a hung or
+    # lost DB connection, not just a fully-crashed process.
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=503, content={"status": "db_unreachable", "detail": str(exc)[:300]})
     return {"status": "ok", "schema_version": settings.schema_version}
 
 
