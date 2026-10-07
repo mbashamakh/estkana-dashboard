@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     loyverse_api_token: str | None = None
     loyverse_base_url: str = "https://api.loyverse.com/v1.0"
 
+    # --- Alerting ---
+    # Where the automatic data-health alert (see app/etl/alerting.py) and
+    # the nightly auto-heal summary (app/etl/run_loyverse_autoheal.py) get
+    # emailed. Sent via Odoo's own outbound mail (app/etl/notify.py) --
+    # reuses the Odoo credentials above instead of needing a separate
+    # email service/account. Alerting is simply off if this isn't set.
+    alert_email: str | None = None
+
     # --- App ---
     schema_version: str = "1"
     environment: str = "development"  # "development" | "production"
