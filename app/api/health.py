@@ -5,118 +5,22 @@ signature) gets caught automatically instead of relying on someone noticing
 wrong numbers on the dashboard and reporting it. Login-gated, same as
 /api/data -- this is a permanent product feature, not a _diag/ endpoint.
 
-Two independent checks, combined:
-  1. Recent SyncLog "WARNING:" entries -- _upsert_day() in run_loyverse_sync.py
-     already writes one of these any time a day's orders would collapse
-     >50% on a write (see its docstring). This is the richest signal since
-     it's tied to the actual write event, not a guess made after the fact.
-  2. A live scan of what's actually stored in loyverse_daily: for every
-     branch, flag any day (excluding today, which is still accumulating)
-     whose orders are <= _COLLAPSE_ORDERS_MAX while that branch's trailing
-     _TRAILING_DAYS-day median is >= _MEDIAN_FLOOR -- the exact signature
-     of every spillover/collapse incident found and fixed in this
-     dashboard's history (confirmed by scanning March-September 2026: 0
-     false positives in two full months of known-healthy data, 36/36 known
-     incidents caught) -- and flag any day with NO row at all between a
-     branch's own first and last active date (a full day silently
-     skipped, not just collapsed).
-This catches both a bug that writes a near-empty day on top of a good one
-and a bug that skips a day's write entirely, without needing to know in
-advance what caused either one.
+The actual scan lives in app/etl/data_health.py (compute_health()), shared
+with the automatic after-sync alert and the nightly auto-heal job -- this
+route is just that same check, wrapped for a logged-in browser request.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.routes import get_current_user
-from app.db.models import LoyverseDaily, SyncLog
 from app.db.session import get_db
+from app.etl.data_health import compute_health
 
 router = APIRouter()
-
-_SCAN_WINDOW_DAYS = 120
-_COLLAPSE_ORDERS_MAX = 10
-_MEDIAN_FLOOR = 50
-_TRAILING_DAYS = 14
-
-
-def _median(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    s = sorted(values)
-    n = len(s)
-    mid = n // 2
-    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
 
 
 @router.get("/api/data-health")
 def data_health(db: Session = Depends(get_db), _user=Depends(get_current_user)):
-    now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
-    cutoff = (now - timedelta(days=_SCAN_WINDOW_DAYS)).strftime("%Y-%m-%d")
-
-    rows = db.scalars(
-        select(LoyverseDaily)
-        .where(LoyverseDaily.date >= cutoff)
-        .order_by(LoyverseDaily.branch, LoyverseDaily.date)
-    ).all()
-
-    by_branch: dict[str, list] = {}
-    for r in rows:
-        by_branch.setdefault(r.branch, []).append(r)
-
-    issues: list[dict] = []
-    for branch, branch_rows in by_branch.items():
-        dates_present = {r.date for r in branch_rows}
-        first_date = branch_rows[0].date
-        last_date = branch_rows[-1].date
-
-        for i, r in enumerate(branch_rows):
-            if r.date >= today:
-                continue  # still accumulating, not a real signal yet
-            trailing = [
-                br.orders for br in branch_rows[max(0, i - _TRAILING_DAYS):i] if br.orders > 0
-            ]
-            med = _median(trailing)
-            if med >= _MEDIAN_FLOOR and r.orders <= _COLLAPSE_ORDERS_MAX:
-                issues.append({
-                    "type": "collapse",
-                    "branch": branch,
-                    "date": r.date,
-                    "orders": r.orders,
-                    "expected_approx": round(med),
-                })
-
-        # Missing-day check: any gap inside the branch's own active range.
-        d = datetime.strptime(first_date, "%Y-%m-%d")
-        end = datetime.strptime(last_date, "%Y-%m-%d")
-        while d < end:
-            d += timedelta(days=1)
-            label = d.strftime("%Y-%m-%d")
-            if label >= today:
-                break
-            if label not in dates_present:
-                issues.append({"type": "missing", "branch": branch, "date": label})
-
-    recent_warnings = db.scalars(
-        select(SyncLog)
-        .where(SyncLog.source == "loyverse", SyncLog.message.like("WARNING:%"))
-        .order_by(SyncLog.started_at.desc())
-        .limit(20)
-    ).all()
-
-    issues.sort(key=lambda x: x["date"], reverse=True)
-
-    return {
-        "ok": len(issues) == 0 and len(recent_warnings) == 0,
-        "issue_count": len(issues),
-        "issues": issues,
-        "recent_sync_warnings": [
-            {"message": w.message, "started_at": w.started_at.isoformat() if w.started_at else None}
-            for w in recent_warnings
-        ],
-    }
+    return compute_health(db)
