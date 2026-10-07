@@ -197,6 +197,12 @@
   .flag { display:inline-flex; align-items:center; gap:4px; font-size:10.5px; font-weight:650; padding:2px 7px; border-radius:6px; margin: 1px 3px 1px 0; }
   .flag.critical { background: var(--critical-bg); color: var(--critical); }
   .flag.warning { background: var(--warning-bgsoft); color: var(--warning); }
+
+  .data-health-banner { display:flex; align-items:flex-start; gap:10px; background: var(--warning-bgsoft); color: var(--warning); border: 1px solid var(--warning); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; font-size: 12.5px; line-height:1.5; }
+  .data-health-banner .dhb-icon { font-size:15px; line-height:1; margin-top:1px; }
+  .data-health-banner .dhb-title { font-weight: 700; margin-bottom: 2px; }
+  .data-health-banner .dhb-list { margin: 4px 0 0; padding-left: 18px; }
+  .data-health-banner .dhb-list li { margin-bottom: 2px; }
   .flag.good { background: var(--good-bg); color: var(--good); }
 
   .traffic-table td.status-cell, .traffic-table th.status-cell { text-align:center; }
@@ -250,6 +256,11 @@
       <button class="theme-toggle" id="logoutBtn">Log out</button>
     </div>
   </header>
+
+  <!-- Automatic data-health banner: hidden unless /api/data-health finds a
+       sync anomaly, so a problem surfaces here on its own instead of
+       needing someone to notice wrong numbers and report it. -->
+  <div id="dataHealthBanner" class="data-health-banner" style="display:none;"></div>
 
   <!-- Row 1: Filters -->
   <div class="filters" id="filters">
@@ -1325,6 +1336,36 @@ function renderSyncStatus(sync) {
     : `Sales data: backfilling 2026 history — ${sync.months_available} month(s) available so far (through ${sync.latest_synced}, target ${sync.backfill_target}).`;
 }
 
+// Renders (or hides) the automatic data-health banner. Failure to even
+// reach /api/data-health is deliberately non-fatal to the rest of the
+// dashboard (see the separate try/catch around its fetch in initDashboard)
+// -- a broken health check should never block real sales data from showing.
+function renderDataHealth(health) {
+  const el = document.getElementById("dataHealthBanner");
+  if (!el) return;
+  if (!health || health.ok) { el.style.display = "none"; return; }
+
+  const items = [];
+  for (const issue of (health.issues || []).slice(0, 6)) {
+    if (issue.type === "collapse") {
+      items.push(`${issue.branch} on ${issue.date}: ${issue.orders} orders (usually ~${issue.expected_approx}) — looks like a sync problem, under review.`);
+    } else {
+      items.push(`${issue.branch} on ${issue.date}: no sales data recorded at all — under review.`);
+    }
+  }
+  const extra = (health.issue_count || 0) - items.length;
+  if (extra > 0) items.push(`…and ${extra} more day(s) flagged.`);
+
+  el.innerHTML = `
+    <span class="dhb-icon">⚠️</span>
+    <div>
+      <div class="dhb-title">Data check found ${health.issue_count} day(s) that may be inaccurate</div>
+      <div>These are being looked at — treat the affected branch/day figures with caution until resolved.</div>
+      <ul class="dhb-list">${items.map(t => `<li>${t}</li>`).join("")}</ul>
+    </div>`;
+  el.style.display = "flex";
+}
+
 async function initDashboard() {
   try {
     const [pnlRes, dataRes] = await Promise.all([
@@ -1346,6 +1387,15 @@ async function initDashboard() {
   pnlPopulateSelect();
   render();
   renderSyncStatus(DATA.sync_status);
+
+  // Separate, non-blocking: a failure or slow response here should never
+  // hide the real dashboard data that already rendered above.
+  try {
+    const healthRes = await fetch("/api/data-health", { credentials: "same-origin" });
+    if (healthRes.ok) renderDataHealth(await healthRes.json());
+  } catch (err) {
+    console.error("Data-health check failed:", err);
+  }
 }
 initDashboard();
 </script>
