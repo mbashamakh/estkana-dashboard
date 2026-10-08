@@ -112,3 +112,36 @@ def test_fully_acknowledged_branch_reports_ok():
     assert health["issue_count"] == 0
     assert health["issues"] == []
     assert len(health["acknowledged_issues"]) == 2
+
+
+def test_old_sync_warning_does_not_keep_health_not_ok():
+    """A WARNING row from weeks ago is history, not a live problem: once
+    every issue is acknowledged, `ok` must go True even though the old
+    warning still sits in the log (and is still returned for information)."""
+    from app.db.models import SyncLog
+
+    db = _make_session()
+    old = datetime.now(timezone.utc) - timedelta(days=20)
+    db.add(SyncLog(source="loyverse", success=True, message="WARNING: Alsamer/2026-08-22 orders would drop",
+                   started_at=old, finished_at=old))
+    db.commit()
+
+    health = compute_health(db)
+    assert health["ok"] is True
+    assert health["fresh_sync_warnings"] == []
+    assert len(health["recent_sync_warnings"]) == 1
+
+
+def test_fresh_sync_warning_makes_health_not_ok():
+    from app.db.models import SyncLog
+
+    db = _make_session()
+    now = datetime.now(timezone.utc)
+    db.add(SyncLog(source="loyverse", success=True, message="WARNING: 5 receipt(s) from unmapped Loyverse store(s)",
+                   started_at=now, finished_at=now))
+    db.commit()
+
+    health = compute_health(db)
+    assert health["ok"] is False
+    assert health["issue_count"] == 0
+    assert len(health["fresh_sync_warnings"]) == 1
