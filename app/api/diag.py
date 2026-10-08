@@ -865,3 +865,59 @@ def diag_loyverse_backfill_stores(secret: str, branches: str, date_from: str, da
     db.commit()
     db.close()
     return {"ok": error is None, "summary": summary, "error": error}
+
+
+@router.get("/api/_diag/loyverse-tz-check")
+def diag_loyverse_tz_check(secret: str, branches: str, date_from: str, date_to: str):
+    """
+    READ-ONLY. For the named branches, sums sales over [date_from, date_to]
+    two ways: bucketing each receipt by its UTC date (what the dashboard does
+    today) and by its Asia/Riyadh (UTC+3) date (what Loyverse's own reports
+    use). Used to prove/disprove that the dashboard-vs-Loyverse monthly gap is
+    purely a day-boundary effect. Writes nothing. Max 40 days.
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from datetime import datetime, timedelta, timezone
+
+    from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
+    from app.etl.run_loyverse_sync import _iso
+
+    name_to_id = {v: k for k, v in STORE_ID_TO_ODOO_NAME.items()}
+    wanted = [b.strip() for b in branches.split(",") if b.strip()]
+    if not wanted or any(b not in name_to_id for b in wanted):
+        return {"ok": False, "error": "unknown/empty branches"}
+    start = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if (end - start).days > 40:
+        return {"ok": False, "error": "max 40 days"}
+
+    settings = get_settings()
+    out: dict = {}
+    for b in wanted:
+        receipts = loyverse_client.list_all_receipts(
+            settings, _iso(start - timedelta(days=2)), _iso(end + timedelta(days=3)), store_id=name_to_id[b],
+        )
+        utc_sales = riyadh_sales = 0.0
+        utc_orders = riyadh_orders = 0
+        for r in receipts:
+            if r.get("cancelled_at"):
+                continue
+            ts = datetime.strptime(r["receipt_date"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            amount = r.get("total_money") or 0.0
+            sign = -1 if r.get("receipt_type") == "REFUND" else 1
+            d_utc = ts.strftime("%Y-%m-%d")
+            d_loc = (ts + timedelta(hours=3)).strftime("%Y-%m-%d")
+            if date_from <= d_utc <= date_to:
+                utc_sales += sign * amount
+                utc_orders += 1 if sign == 1 else 0
+            if date_from <= d_loc <= date_to:
+                riyadh_sales += sign * amount
+                riyadh_orders += 1 if sign == 1 else 0
+        out[b] = {
+            "utc_sales": round(utc_sales, 2), "utc_orders": utc_orders,
+            "riyadh_sales": round(riyadh_sales, 2), "riyadh_orders": riyadh_orders,
+        }
+    return {"ok": True, "result": out}
