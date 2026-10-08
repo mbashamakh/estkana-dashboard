@@ -775,27 +775,31 @@ def diag_loyverse_resync_range(secret: str, date_from: str, date_to: str):
 
 
 @router.get("/api/_diag/loyverse-backfill-stores")
-def diag_loyverse_backfill_stores(secret: str, branches: str, date_from: str, date_to: str):
+def diag_loyverse_backfill_stores(
+    secret: str, branches: str, date_from: str, date_to: str, workers: int = 6, chunk_days: int = 7,
+):
     """
-    Fast, store-scoped backfill: pulls receipts for ONLY the named branches
-    (server-side `store_id` filter, one paginated fetch for the whole range)
-    and upserts just those branches' days in [date_from, date_to]. Built to
-    backfill ARBEEN and NASEEM 3 history after they were (wrongly) excluded /
-    unmapped -- loyverse-resync-range re-pulls every store per day (~85s/day)
-    which is far too slow for months of history of two small stores.
+    Fast, store-scoped, PARALLEL backfill/rebuild. Pulls receipts for ONLY the
+    named branches (server-side `store_id` filter) in `chunk_days`-day chunks,
+    fetching several (branch, chunk) tasks concurrently, and upserts those
+    branches' Saudi-local days in [date_from, date_to]. `branches` is a
+    comma-separated list of odoo_names (e.g. "ARBEEN,NASEEM 3") or "ALL".
 
-    `branches` is a comma-separated list of odoo_names (e.g. "ARBEEN,NASEEM 3").
-    The fetch window is padded one day each side (a receipt's created_at can
-    sit just outside the day its receipt_date lands on -- see
-    _pull_and_upsert_window), but only dates INSIDE [date_from, date_to] are
-    written, so a padded edge day is never overwritten with a partial total.
-    Max 31 days per call. Holds the same advisory lock as the hourly sync and
-    writes a SyncLog row. Idempotent (upserts REPLACE).
+    Why it exists: loyverse-resync-range re-pulls every store one day at a
+    time (~85s/day), which makes rebuilding months of history take hours;
+    this rebuilds a month in minutes. Each chunk's fetch window is padded one
+    day each side (a receipt's created_at can sit just outside the day its
+    receipt_date lands on) but only dates INSIDE the chunk are written, so a
+    padded edge day is never overwritten with a partial total. Aggregation and
+    DB writes happen one chunk at a time in this thread (bounded memory); only
+    the network fetch is parallel. Max 62 days per call. Holds the same
+    advisory lock as the hourly sync and writes a SyncLog row. Idempotent.
     """
     expected = os.getenv("DIAG_SECRET")
     if not expected or secret != expected:
         raise HTTPException(status_code=404)
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime, timedelta, timezone
 
     from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
@@ -804,19 +808,24 @@ def diag_loyverse_backfill_stores(secret: str, branches: str, date_from: str, da
     )
 
     name_to_id = {v: k for k, v in STORE_ID_TO_ODOO_NAME.items()}
-    wanted = [b.strip() for b in branches.split(",") if b.strip()]
+    if branches.strip().upper() == "ALL":
+        wanted = sorted(name_to_id)
+    else:
+        wanted = [b.strip() for b in branches.split(",") if b.strip()]
     unknown = [b for b in wanted if b not in name_to_id]
     if not wanted or unknown:
         return {"ok": False, "error": f"unknown/empty branches: {unknown or branches!r}"}
     try:
-        start = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start = datetime.strptime(date_from, "%Y-%m-%d")
+        end = datetime.strptime(date_to, "%Y-%m-%d")
     except ValueError as exc:
         return {"ok": False, "error": f"date_from/date_to must be YYYY-MM-DD: {exc}"}
     if end < start:
         return {"ok": False, "error": "date_to must be on or after date_from"}
-    if (end - start).days > 31:
-        return {"ok": False, "error": "range too large for one call (max 31 days)"}
+    if (end - start).days > 62:
+        return {"ok": False, "error": "range too large for one call (max 62 days)"}
+    workers = max(1, min(int(workers), 8))
+    chunk_days = max(1, min(int(chunk_days), 14))
 
     settings = get_settings()
     db = SessionLocal()
@@ -825,46 +834,65 @@ def diag_loyverse_backfill_stores(secret: str, branches: str, date_from: str, da
         db.close()
         return {"ok": False, "error": "another loyverse sync is currently in progress -- try again shortly"}
 
+    # (branch, chunk_lo, chunk_hi) tasks, chunk bounds are Saudi-local date labels.
+    tasks = []
+    for b in wanted:
+        lo = start
+        while lo <= end:
+            hi = min(lo + timedelta(days=chunk_days - 1), end)
+            tasks.append((b, lo, hi))
+            lo = hi + timedelta(days=1)
+
     summary: dict = {}
+    failed: list[str] = []
     error = None
+
+    def fetch(task):
+        b, lo, hi = task
+        win_min = _iso(lo - timedelta(days=1))
+        win_max = _iso(hi + timedelta(days=2))
+        return task, loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
+
     try:
-        win_min = _iso(start - timedelta(days=1))
-        win_max = _iso(end + timedelta(days=2))
         items = loyverse_client.list_all_items(settings)
         item_category = build_item_category_lookup(items)
-        receipts: list[dict] = []
-        for b in wanted:
-            receipts.extend(
-                loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
-            )
-        agg = aggregate_receipts(receipts, item_category)
-        lo, hi = date_from, date_to
-        for branch, days in agg["branches"].items():
-            if branch not in wanted:
-                continue
-            for day, day_data in days.items():
-                if lo <= day <= hi:
-                    _upsert_day(db, branch, day, day_data)
-                    s = summary.setdefault(branch, {"days": 0, "sales": 0.0, "orders": 0})
-                    s["days"] += 1
-                    s["sales"] = round(s["sales"] + day_data["sales"], 2)
-                    s["orders"] += day_data["orders"]
-        db.commit()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(fetch, t) for t in tasks]
+            for fut in as_completed(futures):
+                try:
+                    (b, lo, hi), receipts = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(str(exc)[:200])
+                    continue
+                agg = aggregate_receipts(receipts, item_category)
+                lo_s, hi_s = lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d")
+                for day, day_data in agg["branches"].get(b, {}).items():
+                    if lo_s <= day <= hi_s:
+                        _upsert_day(db, b, day, day_data)
+                        s = summary.setdefault(b, {"days": 0, "sales": 0.0, "orders": 0})
+                        s["days"] += 1
+                        s["sales"] = round(s["sales"] + day_data["sales"], 2)
+                        s["orders"] += day_data["orders"]
+                db.commit()
+        if failed:
+            error = f"{len(failed)} chunk(s) failed, e.g. {failed[0]}"
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         error = str(exc)
     finally:
         _release_sync_lock(db)
 
+    total = round(sum(v["sales"] for v in summary.values()), 2)
     db.add(SyncLog(
         source="loyverse", success=error is None,
-        message=(f"manual store backfill {wanted} {date_from}..{date_to}: {summary}"
+        message=(f"manual store backfill {len(wanted)} branch(es) {date_from}..{date_to}: "
+                 f"{sum(v['days'] for v in summary.values())} branch-days, sales {total}"
                  + (f" (FAILED: {error})" if error else ""))[:2000],
         started_at=started, finished_at=datetime.now(timezone.utc),
     ))
     db.commit()
     db.close()
-    return {"ok": error is None, "summary": summary, "error": error}
+    return {"ok": error is None, "total_sales": total, "summary": summary, "error": error, "failed_chunks": failed[:5]}
 
 
 @router.get("/api/_diag/loyverse-tz-check")
