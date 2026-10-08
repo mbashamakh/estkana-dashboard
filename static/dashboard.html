@@ -1376,11 +1376,18 @@ function renderDataHealth(health) {
   }
   const extra = (health.issue_count || 0) - items.length;
   if (extra > 0) items.push(`<li>…and ${extra} more day(s) flagged.</li>`);
+  for (const w of (health.fresh_sync_warnings || []).slice(0, 3)) {
+    const msg = String(w.message || "").replace(/^WARNING:\s*/, "").replace(/</g, "&lt;");
+    items.push(`<li>Sync warning: ${msg}</li>`);
+  }
+  const titleText = (health.issue_count || 0) > 0
+    ? `Data check found ${health.issue_count} day(s) that may be inaccurate`
+    : "Data check: recent sync warning";
 
   el.innerHTML = `
     <span class="dhb-icon">⚠️</span>
     <div>
-      <div class="dhb-title">Data check found ${health.issue_count} day(s) that may be inaccurate</div>
+      <div class="dhb-title">${titleText}</div>
       <div>These are being looked at — treat the affected branch/day figures with caution until resolved.</div>
       <ul class="dhb-list">${items.join("")}</ul>
       <div class="dhb-hint">Already confirmed the reason for one of these? Click "Mark reviewed" so it stops showing here and stops being retried overnight.</div>
