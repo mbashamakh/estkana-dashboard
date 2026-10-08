@@ -3,7 +3,7 @@ Maps Loyverse store IDs to the same branch names odoo_pnl.py already uses
 (the "odoo_name" key branches/AnalyticMonthly/etc. are all keyed by).
 
 Loyverse's own store `name` field is in Arabic; these were matched by
-translation against the 18 real stores returned by GET /stores (see
+translation against the real stores returned by GET /stores (see
 /api/_diag/loyverse). Every store is an unambiguous 1:1 place-name match
 except Khomra -1/-2, which reuses the store-creation-order tie-break the
 user already confirmed for the Odoo side (2026-08-16) — Loyverse's
@@ -25,6 +25,7 @@ STORE_ID_TO_ODOO_NAME: dict[str, str] = {
     "629660f7-744a-4891-914d-91b49d3b3a93": "NOZHA",        # استكانة فرع النزهة
     "a06289ee-62c3-4cf9-ac13-6e9396082f2b": "SHARKIA",      # استكانة فرع الشرقية الريان
     "6a6485e1-80bc-4b33-8a41-b224c5d488f9": "ARBEEN",       # ARBEEN
+    "f8b28bbb-9de7-4f1c-9aa9-22a81c35211c": "NASEEM 3",     # Naseem 3 (added 2026-10-08: was silently dropped as an unmapped store)
     "f8990cfb-b43d-44ae-8dd3-cd16f9a9be1f": "HERAA",        # استكانة فرع حراء
     "3481dfc7-1c89-4558-bd98-63db777ae589": "FALSTEEN",     # استكانة فرع فلسطين
     "b353fb3c-cc47-492f-9db1-5eb2da39cb0d": "HAMDANEYA",    # استكانة فرع الحمدانية
