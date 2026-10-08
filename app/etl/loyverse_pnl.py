@@ -19,6 +19,7 @@ money the user acts on.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 from app.etl.loyverse_category_map import display_category_for
 from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
@@ -37,11 +38,24 @@ def build_item_category_lookup(items: list[dict]) -> dict[str, str]:
     return {it["id"]: display_category_for(it.get("category_id")) for it in items if it.get("id")}
 
 
+# Saudi Arabia is UTC+3 year-round (no DST). Loyverse's own reports bucket each
+# sale by the STORE's local calendar day, but receipt_date arrives in UTC, so
+# bucketing by the raw UTC date puts each local day's first 3 hours (00:00-03:00
+# local) into the previous UTC day, so every day total is shifted. Verified 2026-10-08: ARBEEN and Naseem 3 September totals match Loyverse
+# to the cent with local bucketing, and are ~0.3-0.6% off with UTC bucketing.
+LOCAL_UTC_OFFSET_HOURS = 3
+
+
 def _day(receipt: dict) -> str:
-    """'2026-08-16' from receipt_date's ISO timestamp — receipt_date (the
-    actual transaction time) is used over created_at (sync time) since
-    those can differ, e.g. for a receipt synced late."""
-    return receipt["receipt_date"][:10]
+    """'2026-08-16' -- the Saudi (UTC+3) calendar day of receipt_date.
+    receipt_date (the actual transaction time) is used over created_at (sync
+    time) since those can differ, e.g. for a receipt synced late."""
+    raw = receipt["receipt_date"]
+    try:
+        ts = datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return raw[:10]
+    return (ts + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).strftime("%Y-%m-%d")
 
 
 def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> dict:
