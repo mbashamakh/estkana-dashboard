@@ -854,7 +854,11 @@ def diag_loyverse_backfill_stores(
         # window tight matters: it is both the fetch time and the memory held.
         win_min = _iso(lo - timedelta(hours=4))
         win_max = _iso(hi + timedelta(days=1) - timedelta(hours=2))
-        return task, loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
+        receipts = loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
+        # Aggregate right here in the worker and return only the small daily
+        # summary: the raw receipts (thousands of big dicts) are freed as soon
+        # as this returns, so memory stays bounded by in-flight tasks only.
+        return task, aggregate_receipts(receipts, item_category)
 
     try:
         items = loyverse_client.list_all_items(settings)
@@ -863,11 +867,10 @@ def diag_loyverse_backfill_stores(
             futures = [pool.submit(fetch, t) for t in tasks]
             for fut in as_completed(futures):
                 try:
-                    (b, lo, hi), receipts = fut.result()
+                    (b, lo, hi), agg = fut.result()
                 except Exception as exc:  # noqa: BLE001
                     failed.append(str(exc)[:200])
                     continue
-                agg = aggregate_receipts(receipts, item_category)
                 lo_s, hi_s = lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d")
                 for day, day_data in agg["branches"].get(b, {}).items():
                     if lo_s <= day <= hi_s:
