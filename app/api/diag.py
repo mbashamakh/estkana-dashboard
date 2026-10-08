@@ -772,3 +772,96 @@ def diag_loyverse_resync_range(secret: str, date_from: str, date_to: str):
     finally:
         _release_sync_lock(db)
         db.close()
+
+
+@router.get("/api/_diag/loyverse-backfill-stores")
+def diag_loyverse_backfill_stores(secret: str, branches: str, date_from: str, date_to: str):
+    """
+    Fast, store-scoped backfill: pulls receipts for ONLY the named branches
+    (server-side `store_id` filter, one paginated fetch for the whole range)
+    and upserts just those branches' days in [date_from, date_to]. Built to
+    backfill ARBEEN and NASEEM 3 history after they were (wrongly) excluded /
+    unmapped -- loyverse-resync-range re-pulls every store per day (~85s/day)
+    which is far too slow for months of history of two small stores.
+
+    `branches` is a comma-separated list of odoo_names (e.g. "ARBEEN,NASEEM 3").
+    The fetch window is padded one day each side (a receipt's created_at can
+    sit just outside the day its receipt_date lands on -- see
+    _pull_and_upsert_window), but only dates INSIDE [date_from, date_to] are
+    written, so a padded edge day is never overwritten with a partial total.
+    Max 31 days per call. Holds the same advisory lock as the hourly sync and
+    writes a SyncLog row. Idempotent (upserts REPLACE).
+    """
+    expected = os.getenv("DIAG_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+    from datetime import datetime, timedelta, timezone
+
+    from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
+    from app.etl.run_loyverse_sync import (
+        _iso, _release_sync_lock, _try_acquire_sync_lock, _upsert_day,
+    )
+
+    name_to_id = {v: k for k, v in STORE_ID_TO_ODOO_NAME.items()}
+    wanted = [b.strip() for b in branches.split(",") if b.strip()]
+    unknown = [b for b in wanted if b not in name_to_id]
+    if not wanted or unknown:
+        return {"ok": False, "error": f"unknown/empty branches: {unknown or branches!r}"}
+    try:
+        start = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        return {"ok": False, "error": f"date_from/date_to must be YYYY-MM-DD: {exc}"}
+    if end < start:
+        return {"ok": False, "error": "date_to must be on or after date_from"}
+    if (end - start).days > 31:
+        return {"ok": False, "error": "range too large for one call (max 31 days)"}
+
+    settings = get_settings()
+    db = SessionLocal()
+    started = datetime.now(timezone.utc)
+    if not _try_acquire_sync_lock(db):
+        db.close()
+        return {"ok": False, "error": "another loyverse sync is currently in progress -- try again shortly"}
+
+    summary: dict = {}
+    error = None
+    try:
+        win_min = _iso(start - timedelta(days=1))
+        win_max = _iso(end + timedelta(days=2))
+        items = loyverse_client.list_all_items(settings)
+        item_category = build_item_category_lookup(items)
+        receipts: list[dict] = []
+        for b in wanted:
+            receipts.extend(
+                loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
+            )
+        agg = aggregate_receipts(receipts, item_category)
+        lo, hi = date_from, date_to
+        for branch, days in agg["branches"].items():
+            if branch not in wanted:
+                continue
+            for day, day_data in days.items():
+                if lo <= day <= hi:
+                    _upsert_day(db, branch, day, day_data)
+                    s = summary.setdefault(branch, {"days": 0, "sales": 0.0, "orders": 0})
+                    s["days"] += 1
+                    s["sales"] = round(s["sales"] + day_data["sales"], 2)
+                    s["orders"] += day_data["orders"]
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        error = str(exc)
+    finally:
+        _release_sync_lock(db)
+
+    db.add(SyncLog(
+        source="loyverse", success=error is None,
+        message=(f"manual store backfill {wanted} {date_from}..{date_to}: {summary}"
+                 + (f" (FAILED: {error})" if error else ""))[:2000],
+        started_at=started, finished_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+    db.close()
+    return {"ok": error is None, "summary": summary, "error": error}
