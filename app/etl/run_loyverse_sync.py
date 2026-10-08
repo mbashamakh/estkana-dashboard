@@ -123,6 +123,21 @@ def _pull_and_upsert_window(
     items = loyverse_client.list_all_items(settings)
     item_category = build_item_category_lookup(items)
     agg = aggregate_receipts(receipts, item_category)
+    if agg.get("skipped_unknown_store_receipts"):
+        # Receipts from a store with no entry in STORE_ID_TO_ODOO_NAME are
+        # dropped from the totals. That used to be completely silent (Naseem 3
+        # went unreported for months). Surface it as a WARNING so the data-
+        # health banner and alert email flag it until the store is mapped.
+        ids = ", ".join(f"{sid} ({n} receipts)" for sid, n in sorted(agg.get("skipped_unknown_store_ids", {}).items()))
+        db.add(SyncLog(
+            source="loyverse", success=True,
+            message=(
+                f"WARNING: {agg['skipped_unknown_store_receipts']} receipt(s) from unmapped Loyverse store(s) were "
+                f"excluded from sales totals: {ids}. Add the store id(s) to STORE_ID_TO_ODOO_NAME."
+            )[:2000],
+            started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
     for branch, days in agg["branches"].items():
         for date, day_data in days.items():
             if only_date is not None and date != only_date:
