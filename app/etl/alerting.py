@@ -53,13 +53,16 @@ def check_and_alert(db: Session, settings: Settings) -> None:
             )
         else:
             items.append(f"<li>{issue['branch']} {issue['date']}: no sales data recorded</li>")
-    extra = health["issue_count"] - len(items)
+    for w in health.get("fresh_sync_warnings", [])[:5]:
+        msg = str(w["message"]).replace("WARNING:", "", 1).strip().replace("<", "&lt;")
+        items.append(f"<li>Sync warning: {msg}</li>")
+    extra = health["issue_count"] - len([i for i in items if "Sync warning" not in i])
     if extra > 0:
         items.append(f"<li>...and {extra} more</li>")
 
     body_html = (
         f"<p>The automatic data check found <b>{health['issue_count']}</b> day(s) that look wrong "
-        f"in the Loyverse sales sync.</p>"
+        f"and {len(health.get('fresh_sync_warnings', []))} recent sync warning(s) in the Loyverse sales sync.</p>"
         f"<ul>{''.join(items)}</ul>"
         f"<p>These are retried automatically overnight. Check the dashboard for the latest status: "
         f"<a href='https://estkana-dashboard.onrender.com'>estkana-dashboard.onrender.com</a></p>"
@@ -67,7 +70,7 @@ def check_and_alert(db: Session, settings: Settings) -> None:
 
     sent = send_alert_email(
         settings,
-        subject=f"Estkana dashboard: {health['issue_count']} data issue(s) found",
+        subject=f"Estkana dashboard: {health['issue_count'] + len(health.get('fresh_sync_warnings', []))} data issue(s) found",
         body_html=body_html,
     )
     db.add(SyncLog(
