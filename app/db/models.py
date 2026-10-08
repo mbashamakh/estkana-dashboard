@@ -190,6 +190,32 @@ class SyncLog(Base):
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class DataHealthAck(Base):
+    """
+    Marks one (branch, date) data-health issue as reviewed and explained --
+    e.g. "SHARKIA confirmed closed those days, not a sync bug" -- so it
+    stops re-appearing. Three consumers all key off this same table via
+    compute_health() in etl/data_health.py: the dashboard banner stops
+    showing it, app/etl/run_loyverse_autoheal.py stops burning nightly
+    retries trying to "fix" data that was never wrong, and app/etl/
+    alerting.py stops emailing about it. This is a record of "a human
+    looked at this", not a deletion of the finding -- compute_health()
+    still returns it separately as "acknowledged_issues" so the
+    explanation stays visible/auditable instead of just disappearing.
+    Created via POST /api/data-health/acknowledge (app/api/health.py).
+    """
+    __tablename__ = "data_health_acks"
+    __table_args__ = (UniqueConstraint("branch", "date", name="uq_data_health_ack"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    branch: Mapped[str] = mapped_column(String, nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False)  # "2026-08-30"
+    issue_type: Mapped[str] = mapped_column(String, nullable=False)  # "collapse" | "missing" -- informational only
+    note: Mapped[str | None] = mapped_column(String, nullable=True)
+    acknowledged_by: Mapped[str] = mapped_column(String, nullable=False)  # user email
+    acknowledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class User(Base):
     """
     Login-gated access, admin-managed — no self-signup. `password_hash` is
