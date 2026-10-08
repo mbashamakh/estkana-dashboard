@@ -23,12 +23,12 @@ from collections import defaultdict
 from app.etl.loyverse_category_map import display_category_for
 from app.etl.loyverse_store_map import STORE_ID_TO_ODOO_NAME
 
-# ARBEEN's Loyverse account is a test setup for a different POS app
-# ("Looped") the user is evaluating — confirmed by the user 2026-08-24, not
-# real sales activity. Excluded from aggregation entirely until that
-# integration is ready and the user says to connect it. (ARBEEN still gets
-# real financials from Odoo — this exclusion is Loyverse/sales-side only.)
-LOYVERSE_TEST_BRANCHES = {"ARBEEN"}
+# Branches whose Loyverse receipts are skipped entirely. EMPTY on purpose:
+# ARBEEN was once excluded here as a "test" setup, but the user confirmed
+# 2026-10-08 that nothing in Loyverse is test data -- every store's sales are
+# real (excluding it understated September 2026 by SAR 136,586.69). The
+# mechanism is kept so a genuine test store can be excluded again in one line.
+LOYVERSE_TEST_BRANCHES: set[str] = set()
 
 
 def build_item_category_lookup(items: list[dict]) -> dict[str, str]:
@@ -69,6 +69,7 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
     }))
 
     skipped_unknown_store = 0
+    skipped_unknown_store_ids: dict[str, int] = defaultdict(int)
     skipped_test_branch = 0
     for r in receipts:
         if r.get("cancelled_at"):
@@ -76,6 +77,7 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
         branch = STORE_ID_TO_ODOO_NAME.get(r.get("store_id"))
         if branch is None:
             skipped_unknown_store += 1
+            skipped_unknown_store_ids[str(r.get("store_id"))] += 1
             continue
         if branch in LOYVERSE_TEST_BRANCHES:
             skipped_test_branch += 1
@@ -111,5 +113,6 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
     return {
         "branches": branches,
         "skipped_unknown_store_receipts": skipped_unknown_store,
+        "skipped_unknown_store_ids": dict(skipped_unknown_store_ids),
         "skipped_test_branch_receipts": skipped_test_branch,
     }
