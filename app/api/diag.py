@@ -787,8 +787,8 @@ def diag_loyverse_backfill_stores(
 
     Why it exists: loyverse-resync-range re-pulls every store one day at a
     time (~85s/day), which makes rebuilding months of history take hours;
-    this rebuilds a month in minutes. Each chunk's fetch window is padded one
-    day each side (a receipt's created_at can sit just outside the day its
+    this is several times faster. Each chunk's fetch window is padded one hour
+    each side (a receipt's created_at can sit just outside the day its
     receipt_date lands on) but only dates INSIDE the chunk are written, so a
     padded edge day is never overwritten with a partial total. Aggregation and
     DB writes happen one chunk at a time in this thread (bounded memory); only
@@ -849,8 +849,11 @@ def diag_loyverse_backfill_stores(
 
     def fetch(task):
         b, lo, hi = task
-        win_min = _iso(lo - timedelta(days=1))
-        win_max = _iso(hi + timedelta(days=2))
+        # Saudi-local days lo..hi span [lo 00:00 - 3h, hi+1 00:00 - 3h) in UTC;
+        # padded one hour each side (created_at vs receipt_date skew). Keeping the
+        # window tight matters: it is both the fetch time and the memory held.
+        win_min = _iso(lo - timedelta(hours=4))
+        win_max = _iso(hi + timedelta(days=1) - timedelta(hours=2))
         return task, loyverse_client.list_all_receipts(settings, win_min, win_max, store_id=name_to_id[b])
 
     try:
