@@ -202,7 +202,7 @@ def build_data_response(db: Session) -> dict:
     rows = db.scalars(
         select(LoyverseDaily).where(LoyverseDaily.branch.in_(REAL_BRANCH_NAMES)).order_by(LoyverseDaily.date)
     ).all()
-    today = datetime.now(timezone.utc).date()
+    today = (datetime.now(timezone.utc) + timedelta(hours=3)).date()  # Saudi-local date, same as loyverse_daily's day labels
     year = today.year
     months = _available_months(rows, year, today)
     n_days = (months[-1][3] - date(year, 1, 1)).days + 1 if months else 0
