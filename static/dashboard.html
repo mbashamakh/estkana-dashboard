@@ -203,6 +203,9 @@
   .data-health-banner .dhb-title { font-weight: 700; margin-bottom: 2px; }
   .data-health-banner .dhb-list { margin: 4px 0 0; padding-left: 18px; }
   .data-health-banner .dhb-list li { margin-bottom: 2px; }
+  .data-health-banner .dhb-ack { margin-left: 8px; font-size: 11px; text-decoration: underline; cursor: pointer; color: inherit; opacity: 0.8; white-space: nowrap; }
+  .data-health-banner .dhb-ack:hover { opacity: 1; }
+  .data-health-banner .dhb-hint { margin-top: 4px; opacity: 0.85; font-size: 11.5px; }
   .flag.good { background: var(--good-bg); color: var(--good); }
 
   .traffic-table td.status-cell, .traffic-table th.status-cell { text-align:center; }
@@ -1340,6 +1343,25 @@ function renderSyncStatus(sync) {
 // reach /api/data-health is deliberately non-fatal to the rest of the
 // dashboard (see the separate try/catch around its fetch in initDashboard)
 // -- a broken health check should never block real sales data from showing.
+async function acknowledgeDataHealthIssue(branch, date, issueType) {
+  const note = window.prompt(
+    `Mark ${branch} on ${date} as reviewed. Optional note (e.g. "confirmed closed that day against Loyverse's own report"):`,
+    ""
+  );
+  if (note === null) return; // cancelled
+  try {
+    const res = await fetch("/api/data-health/acknowledge", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch, date, issue_type: issueType, note: note || null }),
+    });
+    if (res.ok) renderDataHealth(await res.json());
+  } catch (err) {
+    console.error("Failed to acknowledge data-health issue:", err);
+  }
+}
+
 function renderDataHealth(health) {
   const el = document.getElementById("dataHealthBanner");
   if (!el) return;
@@ -1347,23 +1369,30 @@ function renderDataHealth(health) {
 
   const items = [];
   for (const issue of (health.issues || []).slice(0, 6)) {
-    if (issue.type === "collapse") {
-      items.push(`${issue.branch} on ${issue.date}: ${issue.orders} orders (usually ~${issue.expected_approx}) — looks like a sync problem, under review.`);
-    } else {
-      items.push(`${issue.branch} on ${issue.date}: no sales data recorded at all — under review.`);
-    }
+    const label = issue.type === "collapse"
+      ? `${issue.branch} on ${issue.date}: ${issue.orders} orders (usually ~${issue.expected_approx}) — looks like a sync problem, under review.`
+      : `${issue.branch} on ${issue.date}: no sales data recorded at all — under review.`;
+    items.push(`<li>${label} <a href="#" class="dhb-ack" data-branch="${issue.branch}" data-date="${issue.date}" data-type="${issue.type}">Mark reviewed</a></li>`);
   }
   const extra = (health.issue_count || 0) - items.length;
-  if (extra > 0) items.push(`…and ${extra} more day(s) flagged.`);
+  if (extra > 0) items.push(`<li>…and ${extra} more day(s) flagged.</li>`);
 
   el.innerHTML = `
     <span class="dhb-icon">⚠️</span>
     <div>
       <div class="dhb-title">Data check found ${health.issue_count} day(s) that may be inaccurate</div>
       <div>These are being looked at — treat the affected branch/day figures with caution until resolved.</div>
-      <ul class="dhb-list">${items.map(t => `<li>${t}</li>`).join("")}</ul>
+      <ul class="dhb-list">${items.join("")}</ul>
+      <div class="dhb-hint">Already confirmed the reason for one of these? Click "Mark reviewed" so it stops showing here and stops being retried overnight.</div>
     </div>`;
   el.style.display = "flex";
+
+  el.querySelectorAll(".dhb-ack").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      acknowledgeDataHealthIssue(a.dataset.branch, a.dataset.date, a.dataset.type);
+    });
+  });
 }
 
 async function initDashboard() {
