@@ -76,7 +76,9 @@ def run_autoheal(db: Session, settings: Settings) -> dict:
     so a caller (e.g. run_loyverse_once.py) can log what happened without
     needing its own db session or settings lookup."""
     health = compute_health(db)
-    if health["ok"]:
+    if health["ok"] or not health["issues"]:
+        # Nothing re-pullable: either all clear, or only sync warnings (e.g.
+        # an unmapped store) that a re-pull of a day can't fix.
         print("Auto-heal: no issues found, nothing to do.")
         return {"ran": True, "fixed": [], "maxed_out": [], "failed": []}
 
