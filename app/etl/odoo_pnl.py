@@ -61,6 +61,7 @@ LOYVERSE_MAP = {
     "Madian": "Al-Madinah",
     "NASEEM 1": "Al-Naseem",
     "NASEEM 2": "Al-Naseem 2",
+    "NASEEM 3": "Al-Naseem 3",
     "slumaniah": "Al-Sulaimaniyah",
     "Zahra": "Al-Zahra",
     "Khomra -1": "Al-Qurainiah",
