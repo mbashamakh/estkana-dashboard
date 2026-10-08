@@ -49,6 +49,11 @@ _SCAN_WINDOW_DAYS = 120
 _COLLAPSE_ORDERS_MAX = 10
 _MEDIAN_FLOOR = 50
 _TRAILING_DAYS = 14
+_WARNING_FRESH_HOURS = 48
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _median(values: list[float]) -> float:
@@ -138,11 +143,25 @@ def compute_health(db: Session) -> dict:
         else:
             active_issues.append(issue)
 
+    # Only RECENT warnings count against "ok". A WARNING row is a historical
+    # event log (e.g. a collapse that was later reviewed and acknowledged); if
+    # old ones kept ok False forever, the banner could never clear. The full
+    # list is still returned for information.
+    fresh_cutoff = now - timedelta(hours=_WARNING_FRESH_HOURS)
+    fresh_warnings = [
+        w for w in recent_warnings
+        if w.started_at is not None and _aware(w.started_at) >= fresh_cutoff
+    ]
+
     return {
-        "ok": len(active_issues) == 0 and len(recent_warnings) == 0,
+        "ok": len(active_issues) == 0 and len(fresh_warnings) == 0,
         "issue_count": len(active_issues),
         "issues": active_issues,
         "acknowledged_issues": acknowledged_issues,
+        "fresh_sync_warnings": [
+            {"message": w.message, "started_at": w.started_at.isoformat() if w.started_at else None}
+            for w in fresh_warnings
+        ],
         "recent_sync_warnings": [
             {"message": w.message, "started_at": w.started_at.isoformat() if w.started_at else None}
             for w in recent_warnings
