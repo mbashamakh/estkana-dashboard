@@ -31,6 +31,8 @@ dashboard:
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 
 from app.config import Settings
@@ -63,13 +65,25 @@ def _get(settings: Settings, path: str, params: dict | None = None) -> dict:
             "Loyverse is not configured — set LOYVERSE_API_TOKEN as an environment variable."
         )
     clean_params = {k: v for k, v in (params or {}).items() if v is not None}
-    try:
-        with _client(settings) as client:
-            resp = client.get(path, params=clean_params)
-    except httpx.TimeoutException as exc:
-        raise LoyverseError(f"Loyverse API timed out on {path} ({type(exc).__name__}): {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise LoyverseError(f"Loyverse API connection failed on {path}: {exc}") from exc
+    # Retry briefly on rate-limiting (429) / transient gateway errors, so
+    # parallel backfills back off instead of failing a whole run.
+    resp = None
+    for attempt in range(5):
+        try:
+            with _client(settings) as client:
+                resp = client.get(path, params=clean_params)
+        except httpx.TimeoutException as exc:
+            raise LoyverseError(f"Loyverse API timed out on {path} ({type(exc).__name__}): {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise LoyverseError(f"Loyverse API connection failed on {path}: {exc}") from exc
+        if resp.status_code in (429, 502, 503, 504) and attempt < 4:
+            try:
+                wait = float(resp.headers.get("Retry-After", ""))
+            except ValueError:
+                wait = 2.0 * (attempt + 1)
+            time.sleep(min(max(wait, 1.0), 20.0))
+            continue
+        break
 
     if resp.status_code >= 400:
         raise LoyverseError(f"Loyverse API {resp.status_code} on {path}: {resp.text[:500]}")
