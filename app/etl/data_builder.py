@@ -4,18 +4,17 @@ sample "template" for whatever this dashboard section still can't source
 for real (cost %, labor %, waste, customer rating, complaints — none of
 which Loyverse or Odoo currently supply per-branch; see project notes).
 
-Only 8 of the 18 branches ever got hand-built sample values for those
+Only 8 of the 19 branches ever got hand-built sample values for those
 still-sample fields (this app's original mockup phase never finished the
 other 10). Rather than inventing branch-specific numbers with no basis,
-the other 10 (and ARBEEN, excluded from real Loyverse data — see
-loyverse_pnl.LOYVERSE_TEST_BRANCHES) get the AVERAGE of the 8 real sample
+the other 11 get the AVERAGE of the 8 real sample
 branches for those fields. This is a clearly-labeled placeholder (the
 frontend already tags every such field "(sample)"), not a claim of
 accuracy — averaging just keeps the dashboard visually coherent instead of
 showing 0% food cost, which would look like a bug rather than missing data.
 
 Sales-side fields (daily sales, orders, AOV, discounts, refunds, category
-mix, top products) are 100% real for all 17 non-test branches, sourced from
+mix, top products) are 100% real for every branch, sourced from
 LoyverseDaily.
 
 Month/YTD availability is gated on backfill completeness — see
