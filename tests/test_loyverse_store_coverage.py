@@ -26,3 +26,16 @@ def test_unmapped_store_is_reported_by_id():
     agg = aggregate_receipts([_receipt("not-a-known-store"), _receipt("not-a-known-store")], {})
     assert agg["skipped_unknown_store_receipts"] == 2
     assert agg["skipped_unknown_store_ids"] == {"not-a-known-store": 2}
+
+
+def test_receipts_are_bucketed_by_saudi_local_day():
+    """Loyverse reports use the store's local (UTC+3) day. A sale at 21:30 UTC
+    is 00:30 local the NEXT day; a sale at 20:59 UTC is still 23:59 local."""
+    late = {"store_id": ARBEEN_ID, "receipt_date": "2026-09-30T21:30:00.000Z", "total_money": 10.0,
+            "receipt_type": "SALE", "line_items": []}
+    early = {"store_id": ARBEEN_ID, "receipt_date": "2026-09-30T20:59:59.000Z", "total_money": 5.0,
+             "receipt_type": "SALE", "line_items": []}
+    agg = aggregate_receipts([late, early], {})
+    days = agg["branches"]["ARBEEN"]
+    assert days["2026-10-01"]["sales"] == 10.0
+    assert days["2026-09-30"]["sales"] == 5.0
