@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db.models import LoyverseDaily, SyncCursor, SyncLog
 from app.etl import loyverse_client
-from app.etl.loyverse_pnl import aggregate_receipts, build_item_category_lookup
+from app.etl.loyverse_pnl import LOCAL_UTC_OFFSET_HOURS, aggregate_receipts, build_item_category_lookup
 
 BACKFILL_CHUNK_DAYS = 5
 
@@ -51,6 +51,18 @@ def _backfill_target_date(now: datetime) -> str:
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _local_day_window(day: datetime) -> tuple[str, str]:
+    """created_at window covering one Saudi (UTC+3) calendar day, given any
+    datetime whose DATE is that local date. The local day D spans
+    [D-1 21:00Z, D 21:00Z); padded one hour each side because a receipt's
+    created_at can sit slightly outside the day its receipt_date lands on --
+    the exact day is enforced afterwards by only_date, so the padding can't
+    leak neighbouring days into the write."""
+    midnight = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    offset = timedelta(hours=LOCAL_UTC_OFFSET_HOURS)
+    return _iso(midnight - offset - timedelta(hours=1)), _iso(midnight + timedelta(days=1) - offset + timedelta(hours=1))
 
 
 def _upsert_day(db: Session, branch: str, date: str, day_data: dict) -> None:
@@ -151,8 +163,7 @@ def _pull_and_upsert_full_day(db: Session, settings: Settings, day: datetime) ->
     (day 00:00 -> day+1 00:00), regardless of what time `day` itself is.
     Restricted to `day` itself -- see _pull_and_upsert_window's `only_date`
     docstring for why."""
-    day_min = _iso(day.replace(hour=0, minute=0, second=0, microsecond=0))
-    day_max = _iso((day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+    day_min, day_max = _local_day_window(day)
     return _pull_and_upsert_window(db, settings, day_min, day_max, only_date=day.strftime("%Y-%m-%d"))
 
 
@@ -237,7 +248,9 @@ def sync_loyverse(db: Session, settings: Settings) -> dict:
 
 def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
     started = datetime.now(timezone.utc)
-    now = datetime.now(timezone.utc)
+    # "now" expressed as a Saudi-local wall clock: every day label in this
+    # module is a Saudi (UTC+3) calendar date, matching Loyverse's reports.
+    now = datetime.now(timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)
 
     # 1. Incremental — always runs, keeps "today" and "yesterday" current.
     # Its own try/except so a backfill-chunk failure below still lets this
@@ -288,8 +301,7 @@ def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
             anchor = datetime.strptime(cursor, "%Y-%m-%d") if cursor else now
             backfill_day = anchor - timedelta(days=1)
             day_label = backfill_day.strftime("%Y-%m-%d")
-            day_min = _iso(backfill_day.replace(hour=0, minute=0, second=0, microsecond=0))
-            day_max = _iso((backfill_day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+            day_min, day_max = _local_day_window(backfill_day)
             count = _pull_and_upsert_window(db, settings, day_min, day_max, only_date=day_label)
             # Cursor only ever advances on a deliberate, completed pull of
             # exactly this day -- never inferred from what a stray
