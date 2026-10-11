@@ -329,6 +329,7 @@
         <div class="row-title"><div class="section-title">Cost &amp; profitability</div></div>
         <div class="section-sub">Selected scope</div>
         <div class="four-col" id="costGrid" style="grid-template-columns:repeat(2,1fr); gap:14px;"></div>
+        <div id="costGaps"></div>
       </div>
     </div>
   </section>
@@ -965,6 +966,22 @@ function renderCostGrid(agg) {
     <div class="mlabel">Outlet Profit / Contribution</div><div class="mvalue">${fmtSAR(agg.contribution,true)}</div>
     <div class="msub">Sales after actual cost, labor cost, and half of discounts</div>
     <div class="source-tag">via ${contributionSourceTag(agg.food_cost_real_frac)}</div></div>`;
+  renderCostGaps();
+}
+
+// Items sold that have no recipe cost on the Respie.xlsx sheet -> ask for the cost to be added.
+function renderCostGaps() {
+  const el = document.getElementById("costGaps");
+  if (!el) return;
+  const m = DATA.meta || {};
+  const list = m.uncosted_items || [];
+  if (!list.length) { el.innerHTML = ""; return; }
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const top = list.slice(0, 8).map(i => `${esc(i.name)} (${fmtSAR(i.sales, true)})`).join(" · ");
+  el.innerHTML = `<div style="margin-top:12px; padding:10px 12px; border:1px solid #e0b100; background:#fff8e1; border-radius:8px; font-size:12px; line-height:1.5; color:#5c4400;">
+    <b>Action needed: update recipe cost.</b> ${m.uncosted_count} item(s) sold this year have no cost on the recipe sheet
+    (${fmtSAR(m.uncosted_sales, true)} ex-VAT, ${m.uncosted_sales_pct}% of sales), so they are left out of Standard Cost %.
+    Add their cost to Respie.xlsx: ${top}${m.uncosted_count > 8 ? " …" : ""}</div>`;
 }
 
 // ---------------- Render: Traffic light table ----------------
