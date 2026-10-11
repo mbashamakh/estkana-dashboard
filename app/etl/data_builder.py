@@ -101,6 +101,18 @@ def standard_cost_pct_for(item_qty_sales: dict[str, tuple[float, float]]) -> flo
     return round(cost / price * 100, 2)
 
 
+def uncosted_items(item_agg: dict) -> list[dict]:
+    """Items this branch sold that have NO recipe cost on the sheet (Respie.xlsx),
+    so they are missing from Standard Cost %. Surfaced on the dashboard so the
+    cost can be added to the sheet."""
+    ref = _load_standard_cost()["items"]
+    return [
+        {"name": n, "qty": round(v["qty"]), "sales": round(v["sales"], 2)}
+        for n, v in item_agg.items()
+        if v["qty"] > 0 and _norm_item(n) not in ref
+    ]
+
+
 def _load_sample() -> dict:
     with open(_FIXTURE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -269,6 +281,8 @@ def build_data_response(db: Session) -> dict:
         rows_by_branch[r.branch][r.date] = r
 
     branches_out = []
+    uncosted_total: dict[str, dict] = {}
+    real_sales_total = 0.0
     for odoo_name in ALL_ODOO_BRANCH_NAMES:
         loy_name = LOYVERSE_MAP.get(odoo_name, odoo_name)
         sample_b = odoo_name_to_sample.get(odoo_name)
@@ -324,6 +338,12 @@ def build_data_response(db: Session) -> dict:
         # computed on this branch's own item mix and actual ex-VAT selling prices,
         # not the flat sample value.
         scalars["standard_cost_pct"] = standard_cost_pct_for({n: (v["qty"], v["sales"]) for n, v in item_agg.items()}) if is_real else _load_standard_cost()["company_standard_cost_pct"]
+        if is_real:
+            real_sales_total += total_sales
+            for it in uncosted_items(item_agg):
+                g = uncosted_total.setdefault(it["name"], {"name": it["name"], "qty": 0, "sales": 0.0})
+                g["qty"] += it["qty"]
+                g["sales"] = round(g["sales"] + it["sales"], 2)
 
         monthly_rows = []
         for position, (mi, label, _s, _e, _partial) in enumerate(months, start=1):
@@ -405,6 +425,9 @@ def build_data_response(db: Session) -> dict:
         for _mi, _label, m_start, m_end, _partial in months
     ]
 
+    uncosted = sorted(uncosted_total.values(), key=lambda g: -g["sales"])
+    uncosted_sales = sum(g["sales"] for g in uncosted)
+
     return {
         "branches": branches_out,
         "meta": {
@@ -414,6 +437,11 @@ def build_data_response(db: Session) -> dict:
             "month_names": month_names,
             "month_ranges": month_ranges,
             "daily_start_last_year": sample["meta"]["daily_start_last_year"],
+            # items sold with no recipe cost on Respie.xlsx (year to date, ex-VAT)
+            "uncosted_items": uncosted[:30],
+            "uncosted_count": len(uncosted),
+            "uncosted_sales": round(uncosted_sales),
+            "uncosted_sales_pct": round(uncosted_sales / real_sales_total * 100, 2) if real_sales_total else 0.0,
         },
         "sync_status": {
             "months_available": len(months),
