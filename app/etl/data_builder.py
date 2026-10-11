@@ -78,21 +78,24 @@ def _load_standard_cost() -> dict:
     return _std_cost_cache
 
 
-def standard_cost_pct_for(item_qty: dict[str, float]) -> float:
-    """Standard (recipe) cost % for a branch: sum(sheet cost x qty sold) /
-    sum(sheet ex-VAT price x qty sold) over the items this branch sold that
-    exist in the recipe-cost sheet (Respie.xlsx). Falls back to the sheet's
-    own company-wide figure when too little of the branch's volume matches."""
+def standard_cost_pct_for(item_qty_sales: dict[str, tuple[float, float]]) -> float:
+    """Standard (recipe) cost % for a branch: sum(sheet recipe cost x qty sold) /
+    sum(ACTUAL ex-VAT sales) over the items this branch sold that exist in the
+    recipe-cost sheet (Respie.xlsx). Uses real selling prices (not the sheet's
+    prices) so it is comparable with Actual Cost % (Odoo cost / real revenue).
+    `item_qty_sales` maps item name -> (qty sold, ex-VAT sales). Falls back to
+    the sheet's own company-wide figure when too little of the branch's volume
+    matches."""
     std = _load_standard_cost()
     ref = std["items"]
     cost = price = matched = total = 0.0
-    for name, qty in item_qty.items():
+    for name, (qty, sales) in item_qty_sales.items():
         total += qty
         e = ref.get(_norm_item(name))
         if e and qty > 0:
             matched += qty
             cost += e["cost"] * qty
-            price += e["price_ex_vat"] * qty
+            price += sales
     if total <= 0 or price <= 0 or matched / total < _STANDARD_COST_MIN_COVERAGE:
         return std["company_standard_cost_pct"]
     return round(cost / price * 100, 2)
@@ -318,8 +321,9 @@ def build_data_response(db: Session) -> dict:
 
         scalars = {f: (sample_b[f] if sample_b else avg["scalars"][f]) for f in _SAMPLE_ONLY_SCALAR_FIELDS}
         # Standard cost % comes from the real recipe-cost sheet (Respie.xlsx),
-        # computed on this branch's own item mix, not the flat sample value.
-        scalars["standard_cost_pct"] = standard_cost_pct_for({n: v["qty"] for n, v in item_agg.items()}) if is_real else _load_standard_cost()["company_standard_cost_pct"]
+        # computed on this branch's own item mix and actual ex-VAT selling prices,
+        # not the flat sample value.
+        scalars["standard_cost_pct"] = standard_cost_pct_for({n: (v["qty"], v["sales"]) for n, v in item_agg.items()}) if is_real else _load_standard_cost()["company_standard_cost_pct"]
 
         monthly_rows = []
         for position, (mi, label, _s, _e, _partial) in enumerate(months, start=1):
