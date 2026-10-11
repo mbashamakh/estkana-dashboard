@@ -413,7 +413,7 @@
       <div class="filter-group">
         <label>Scope</label>
         <select id="pnlScopeSelect">
-          <option value="rollup">Outlets only (18 branches)</option>
+          <option value="rollup">Outlets only (19 branches)</option>
           <option value="company">Company total (incl. HQ/overhead)</option>
         </select>
       </div>
@@ -492,7 +492,7 @@
      recipe costing that rolls up).
    - Customer Rating → Google Maps, via Claude-in-Chrome browser lookup
      (Confirmed by user 2026-08-16). Read the public star rating off each
-     of the 18 branch listings directly — no API key/OAuth needed. Note:
+     of the 19 branch listings directly — no API key/OAuth needed. Note:
      this is a manual snapshot, not a live feed; re-check periodically to
      refresh.
    - Inventory Variance → derived, not a separate pull: |Actual Cost % −
@@ -1170,7 +1170,7 @@ function renderPnL() {
   if (pnlState.outlet === "all") {
     stmtAgg = rollupAgg;
     contributionPct = 100;
-    stmtLabel = "Outlets only (18 branches)";
+    stmtLabel = "Outlets only (19 branches)";
   } else {
     const branch = PNL.branches.find(b => b.odoo_name === pnlState.outlet);
     stmtAgg = pnlAggMonths(branch.months, labels);
@@ -1283,7 +1283,7 @@ function renderPnL() {
   const mapRows = PNL.branches.map(b => ({code:b.code, odoo:b.odoo_name, loy:b.loyverse_name, status:"Linked"}));
   PNL.overhead_excluded_from_branch_rollup.forEach(name => mapRows.push({code:"—", odoo:name,
     loy: name==="Outlet" ? "— (umbrella account)" : "— (not outlet-level)",
-    status: name==="Outlet" ? "Umbrella/total account — duplicate of the 18 branch totals, excluded to avoid double-counting" : "HQ / shared cost center — excluded from outlet rollup"}));
+    status: name==="Outlet" ? "Umbrella/total account — duplicate of the 19 branch totals, excluded to avoid double-counting" : "HQ / shared cost center — excluded from outlet rollup"}));
   PNL.dormant_excluded_from_branch_rollup.forEach(name => mapRows.push({code:"—", odoo:name, loy:"— (no matching activity)", status:"Dormant — no meaningful activity"}));
   document.getElementById("pnlMappingTable").innerHTML = mapRows.map(r => `
     <tr><td>${r.odoo}${r.code!=="—"?`<div style="font-size:10.5px;color:var(--text-muted)">${r.code}</div>`:""}</td><td>${r.loy}</td><td>${r.status}</td></tr>`).join("");
