@@ -268,11 +268,18 @@ def build_data_response(db: Session) -> dict:
         for row in db.scalars(select(AnalyticMonthly).where(AnalyticMonthly.kind == "branch")).all()
     }
 
-    rows = db.scalars(
+    all_rows = db.scalars(
         select(LoyverseDaily).where(LoyverseDaily.branch.in_(REAL_BRANCH_NAMES)).order_by(LoyverseDaily.date)
     ).all()
     today = (datetime.now(timezone.utc) + timedelta(hours=3)).date()  # Saudi-local date, same as loyverse_daily's day labels
     year = today.year
+    # current-year rows drive everything; last year's rows (backfilled from Loyverse)
+    # only feed the "same period last year" comparison line.
+    rows = [r for r in all_rows if r.date[:4] == str(year)]
+    ly_rows_by_branch: dict[str, dict[str, LoyverseDaily]] = defaultdict(dict)
+    for r in all_rows:
+        if r.date[:4] == str(year - 1):
+            ly_rows_by_branch[r.branch][r.date] = r
     months = _available_months(rows, year, today)
     n_days = (months[-1][3] - date(year, 1, 1)).days + 1 if months else 0
 
@@ -290,6 +297,15 @@ def build_data_response(db: Session) -> dict:
 
         # --- real, day-indexed sales array (length n_days, from Jan 1) ---
         daily = [0.0] * n_days
+        # same-day-of-year sales last year (real Loyverse, ex-VAT), aligned to `daily`
+        daily_ly_real = [0.0] * n_days
+        if is_real:
+            ly_rows = ly_rows_by_branch.get(odoo_name, {})
+            ly_start = date(year - 1, 1, 1)
+            for i in range(n_days):
+                lr = ly_rows.get((ly_start + timedelta(days=i)).isoformat())
+                if lr:
+                    daily_ly_real[i] = round(ex_vat(lr.sales), 2)
         month_agg: dict[int, dict] = {}
         cat_sales: dict[str, float] = defaultdict(float)
         item_agg: dict[str, dict] = {}
@@ -400,7 +416,7 @@ def build_data_response(db: Session) -> dict:
             "waste_breakdown": sample_b["waste_breakdown"] if sample_b else avg["waste_breakdown"],
             "peak_hours": sample_b["peak_hours"] if sample_b else avg["peak_hours"],
             "daily": daily if is_real else (sample_b["daily"][:n_days] if sample_b else [0.0] * n_days),
-            "daily_ly": sample_b["daily_ly"][:n_days] if sample_b else avg["daily_ly"][:n_days],
+            "daily_ly": daily_ly_real if is_real else (sample_b["daily_ly"][:n_days] if sample_b else avg["daily_ly"][:n_days]),
             "monthly": monthly_rows,
             "is_real_sales": is_real,
         })
