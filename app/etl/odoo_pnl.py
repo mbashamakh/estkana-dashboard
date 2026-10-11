@@ -34,7 +34,9 @@ OVERHEAD = {"CPU", "FIN", "GM", "HO", "HR", "Kaftrea", "MAINTINANACE", "Operatio
 
 # Branches with no meaningful activity in the current dataset — excluded from
 # the branch rollup so they don't drag down averages with all-zero rows.
-DORMANT_NAMES = {"Alsamer 2", "NASEEM 3"}
+# NASEEM 3 is no longer dormant: it now trades and has real Odoo revenue/COGS, so
+# its analytic rows must be synced (they feed Actual Cost % on the dashboard).
+DORMANT_NAMES = {"Alsamer 2"}
 
 # The subset of OVERHEAD the user asked to see broken out individually in the
 # "HQ / overhead cost centers" chart. Excludes Kaftrea (not requested) and
@@ -162,12 +164,13 @@ def ytd_from_months(months: list[dict]) -> dict:
     }
 
 
-def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
+def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict], dormant: set[str] | None = None) -> dict:
     """
     Main entry point. rev/cogs/opex are the raw pulled record lists (same
     shape as mrev.json/mcogs.json/mopex.json). Returns the exact dict shape
     the dashboard's `const PNL = {...}` currently holds.
     """
+    dormant = DORMANT_NAMES if dormant is None else dormant
     month_order = derive_month_order(rev, cogs, opex)
 
     rev_idx, rev_codes = _build_index(rev)
@@ -175,7 +178,7 @@ def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
     opex_idx, opex_codes = _build_index(opex, sign=-1)
 
     all_names = set(rev_idx) | set(cogs_idx) | set(opex_idx)
-    branch_names = sorted(n for n in all_names if n not in OVERHEAD and n not in DORMANT_NAMES)
+    branch_names = sorted(n for n in all_names if n not in OVERHEAD and n not in dormant)
 
     def monthly_for(name: str) -> list[dict]:
         rows = []
@@ -285,7 +288,7 @@ def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
         "overhead_accounts": overhead_accounts,
         "cross_check_vs_outlet_umbrella_account": cross_check,
         "overhead_excluded_from_branch_rollup": sorted(OVERHEAD),
-        "dormant_excluded_from_branch_rollup": sorted(DORMANT_NAMES),
+        "dormant_excluded_from_branch_rollup": sorted(dormant),
         "ambiguous_mapping": ["Khomra -1", "Khomra -2"],
         "month_order": month_order,
     }
