@@ -946,7 +946,7 @@ function renderCostGrid(agg) {
   const lc = statusOf(agg.labor_cost_pct, 20, "lte", 2);
   const costSource = costSourceTag(agg.food_cost_real_frac);
   const items = [
-    {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"Excel (sample — not yet connected)"},
+    {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"recipe cost sheet (Respie.xlsx), ex-VAT"},
     {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:costSource},
     {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Sample — no Odoo labor/payroll account mapped yet"},
     {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:costSource},
