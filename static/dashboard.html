@@ -702,7 +702,7 @@ function computeAgg(branches, period) {
   return { daily, dailyPrev, sales, salesPrev, dailyPrevMonth, salesPrevMonth, dailyLastYear, salesLastYear,
     orders, target, aov, food_cost_pct, food_cost_real_frac, standard_cost_pct, labor_cost_pct,
     waste_pct, discount_pct, refund_pct, inv_variance_pct, rating, gross_margin_pct, gross_profit,
-    contribution, categories, items, discount_amt, refund_amt, refund_orders, waste_value, wasteBreakdown,
+    contribution, odoo_net: odooNetProfit(branches, monthIndices), categories, items, discount_amt, refund_amt, refund_orders, waste_value, wasteBreakdown,
     complaints, n_branches: branches.length, monthIndices, dayRange: [dS,dE] };
 }
 
@@ -818,6 +818,31 @@ function contributionSourceTag(frac) {
     : "Odoo (sample — see P&L section for real data)";
 }
 
+// Net profit exactly as the P&L section / Odoo shows it: gross profit - operating
+// expenses - the selected outlets' share of the HO and CPU cost centers (shares
+// split by each outlet's share of total outlet revenue, same rule as the P&L
+// statement). Only months Odoo has actually posted revenue for are included.
+function odooNetProfit(branches, monthIndices) {
+  if (!PNL) return null;
+  const requested = monthIndices.map(i => String(MONTH_NAMES[i-1]).replace(/\s*\(.*$/, ""));
+  const posted = new Set(PNL.branch_rollup.months.filter(m => m.revenue > 0).map(m => m.m));
+  const labels = requested.filter(l => posted.has(l));
+  if (!labels.length) return null;
+  const names = new Set(branches.map(b => b.name));
+  const rollRev = sum(PNL.branch_rollup.months.filter(m => labels.includes(m.m)).map(m => m.revenue));
+  let rev = 0, gpLessOpex = 0;
+  PNL.branches.filter(pb => names.has(pb.loyverse_name)).forEach(pb => {
+    const a = pnlAggMonths(pb.months, labels);
+    rev += a.revenue;
+    gpLessOpex += a.gross_profit - a.opex;
+  });
+  if (!rev) return null;
+  const share = rollRev ? rev / rollRev : 0;
+  const ho = -pnlAggMonths(PNL.ho.months, labels).net_profit;
+  const cpu = -pnlAggMonths(PNL.cpu.months, labels).net_profit;
+  return { net: gpLessOpex - (ho + cpu) * share, months: labels.length, requested: requested.length };
+}
+
 // ---------------- Render: KPI cards ----------------
 function renderKPIs(agg) {
   const grid = document.getElementById("kpiGrid");
@@ -829,7 +854,10 @@ function renderKPIs(agg) {
     { label: "Number of Orders", value: agg.orders.toLocaleString(), sub: "orders in period", accent:"var(--series-3)", source:"Loyverse" },
     { label: "Average Order Value", value: fmtSAR(agg.aov), sub: "Total sales ÷ orders", accent:"var(--series-4)", source:"Loyverse" },
     { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:costSourceTag(agg.food_cost_real_frac) },
-    { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs", accent:"var(--series-2)", source:contributionSourceTag(agg.food_cost_real_frac) },
+    agg.odoo_net
+      ? { label: "Net Profit", value: fmtSAR(agg.odoo_net.net, true), sub: "after HO & CPU share (as in Odoo)", accent:"var(--series-2)",
+          source: "Odoo (real)" + (agg.odoo_net.months < agg.odoo_net.requested ? ` — ${agg.odoo_net.months} of ${agg.odoo_net.requested} selected months posted in Odoo` : "") }
+      : { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs (Odoo not posted yet)", accent:"var(--series-2)", source:contributionSourceTag(agg.food_cost_real_frac) },
   ];
   grid.innerHTML = "";
   cards.forEach(c => {
