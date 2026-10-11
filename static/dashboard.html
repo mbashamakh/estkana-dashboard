@@ -630,7 +630,7 @@ function computeAgg(branches, period) {
   // "Same period last year" — daily_ly covers the identical Jan1-Aug16 span, so the
   // day range aligns 1:1 with the current period, no resizing needed.
   const dailyLastYearRaw = Array(dE-dS).fill(0);
-  branches.forEach(b => { for (let i=dS;i<dE;i++) dailyLastYearRaw[i-dS]+=(b.daily_ly ? b.daily_ly[i] : 0); });
+  branches.forEach(b => { for (let i=dS;i<dE;i++) dailyLastYearRaw[i-dS]+=(b.daily_ly ? (b.daily_ly[i] || 0) : 0); });
   const dailyLastYear = dailyLastYearRaw;
   const salesLastYear = sum(dailyLastYearRaw);
 
