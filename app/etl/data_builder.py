@@ -25,6 +25,7 @@ simply isn't backfilled yet.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,48 @@ def _slugify(name: str) -> str:
     while "--" in out:
         out = out.replace("--", "-")
     return out.strip("-")
+
+
+_STANDARD_COST_PATH = Path(__file__).parent / "fixtures" / "standard_cost.json"
+_STANDARD_COST_MIN_COVERAGE = 0.5
+_std_cost_cache: dict | None = None
+
+
+def _norm_item(name: str) -> str:
+    """Normalize an item name so Loyverse names ("شباتي دجاج صاج") match the
+    recipe-cost sheet's size/variant-suffixed names ("... (عادي)")."""
+    s = re.sub(r"\(.*?\)", "", name)
+    for a, b in (("ة", "ه"), ("ى", "ي"), ("أ", "ا"), ("إ", "ا"), ("آ", "ا")):
+        s = s.replace(a, b)
+    return re.sub(r"\s+", "", s)
+
+
+def _load_standard_cost() -> dict:
+    global _std_cost_cache
+    if _std_cost_cache is None:
+        with open(_STANDARD_COST_PATH, "r", encoding="utf-8") as f:
+            _std_cost_cache = json.load(f)
+    return _std_cost_cache
+
+
+def standard_cost_pct_for(item_qty: dict[str, float]) -> float:
+    """Standard (recipe) cost % for a branch: sum(sheet cost x qty sold) /
+    sum(sheet ex-VAT price x qty sold) over the items this branch sold that
+    exist in the recipe-cost sheet (Respie.xlsx). Falls back to the sheet's
+    own company-wide figure when too little of the branch's volume matches."""
+    std = _load_standard_cost()
+    ref = std["items"]
+    cost = price = matched = total = 0.0
+    for name, qty in item_qty.items():
+        total += qty
+        e = ref.get(_norm_item(name))
+        if e and qty > 0:
+            matched += qty
+            cost += e["cost"] * qty
+            price += e["price_ex_vat"] * qty
+    if total <= 0 or price <= 0 or matched / total < _STANDARD_COST_MIN_COVERAGE:
+        return std["company_standard_cost_pct"]
+    return round(cost / price * 100, 2)
 
 
 def _load_sample() -> dict:
@@ -274,6 +317,9 @@ def build_data_response(db: Session) -> dict:
         )[:20]
 
         scalars = {f: (sample_b[f] if sample_b else avg["scalars"][f]) for f in _SAMPLE_ONLY_SCALAR_FIELDS}
+        # Standard cost % comes from the real recipe-cost sheet (Respie.xlsx),
+        # computed on this branch's own item mix, not the flat sample value.
+        scalars["standard_cost_pct"] = standard_cost_pct_for({n: v["qty"] for n, v in item_agg.items()}) if is_real else _load_standard_cost()["company_standard_cost_pct"]
 
         monthly_rows = []
         for position, (mi, label, _s, _e, _partial) in enumerate(months, start=1):
