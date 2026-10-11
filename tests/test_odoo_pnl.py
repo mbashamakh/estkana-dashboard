@@ -22,7 +22,8 @@ def result():
     rev = json.loads((FIXTURES / "mrev.json").read_text())
     cogs = json.loads((FIXTURES / "mcogs.json").read_text())
     opex = json.loads((FIXTURES / "mopex.json").read_text())
-    return build_pnl(rev, cogs, opex)
+    # fixtures are the older snapshot in which NASEEM 3 had no activity yet
+    return build_pnl(rev, cogs, opex, dormant={"Alsamer 2", "NASEEM 3"})
 
 
 @pytest.fixture(scope="module")
