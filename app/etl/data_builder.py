@@ -127,6 +127,17 @@ def _available_months(rows: list[LoyverseDaily], year: int, today: date) -> list
     return months
 
 
+# Loyverse `total_money` (what loyverse_daily stores) is VAT-INCLUSIVE. The
+# dashboard reports every sales figure net of Saudi VAT (15%), consistent with
+# Loyverse's own ex-VAT reports and with Odoo revenue/COGS (also ex-VAT), so the
+# conversion happens here at the display layer; stored rows stay inclusive.
+VAT_RATE = 0.15
+
+
+def ex_vat(amount: float) -> float:
+    return amount / (1 + VAT_RATE)
+
+
 def _branch_month_cost_fields(
     *, is_real: bool, odoo_row, sample_food_cost_pct: float, labor_cost_pct: float,
     sales: float, discount_amt: float,
@@ -233,20 +244,20 @@ def build_data_response(db: Session) -> dict:
                     if row:
                         offset = (d - date(year, 1, 1)).days
                         if 0 <= offset < n_days:
-                            daily[offset] = round(row.sales, 2)
-                        m_sales += row.sales
+                            daily[offset] = round(ex_vat(row.sales), 2)
+                        m_sales += ex_vat(row.sales)
                         m_orders += row.orders
-                        m_discount += row.discount_amt
-                        m_refund += row.refund_amt
-                        total_sales += row.sales
+                        m_discount += ex_vat(row.discount_amt)
+                        m_refund += ex_vat(row.refund_amt)
+                        total_sales += ex_vat(row.sales)
                         total_orders += row.orders
-                        total_discount += row.discount_amt
-                        total_refund += row.refund_amt
+                        total_discount += ex_vat(row.discount_amt)
+                        total_refund += ex_vat(row.refund_amt)
                         for name, info in row.line_items.items():
-                            cat_sales[info["cat"]] += info["sales"]
+                            cat_sales[info["cat"]] += ex_vat(info["sales"])
                             entry = item_agg.setdefault(name, {"name": name, "cat": info["cat"], "qty": 0.0, "sales": 0.0})
                             entry["qty"] += info["qty"]
-                            entry["sales"] += info["sales"]
+                            entry["sales"] += ex_vat(info["sales"])
                     d += timedelta(days=1)
                 month_agg[mi] = {"sales": round(m_sales, 2), "orders": int(m_orders),
                                   "discount_amt": round(m_discount, 2), "refund_amt": round(m_refund, 2)}
