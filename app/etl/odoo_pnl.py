@@ -292,3 +292,50 @@ def build_pnl(rev: list[dict], cogs: list[dict], opex: list[dict], dormant: set[
         "ambiguous_mapping": ["Khomra -1", "Khomra -2"],
         "month_order": month_order,
     }
+
+
+# ---------------------------------------------------------------------------
+# Company totals straight from Odoo's general ledger
+# ---------------------------------------------------------------------------
+# The analytic-account figures above are the right basis for the per-outlet
+# view, but they do not add up to Odoo's own Profit & Loss report (overheads
+# are distributed across several analytic accounts and "Other income" never
+# carries an analytic tag at all). Odoo's report is built from the ledger
+# (account.move.line) grouped by account type, so the company-level
+# "Net profit" is taken from there to tie out exactly.
+_GL_TYPE_TO_FIELD = {
+    "income": ("revenue", -1),            # credits are stored negative
+    "income_other": ("other_income", -1),
+    "expense_direct_cost": ("cogs", 1),
+    "expense": ("opex", 1),
+    "expense_depreciation": ("opex", 1),
+    "expense_other": ("other_expense", 1),
+}
+
+
+def build_gl_company(groups: Iterable[dict]) -> list[dict]:
+    """
+    groups: [{"t": account_type, "m": "September 2026", "v": signed balance}, ...]
+    Returns chronological month rows
+        {"m", "revenue", "cogs", "opex", "other_income", "other_expense"}
+    with every figure a positive number (Odoo's Profit & Loss sign convention).
+    Account types outside the P&L (assets, liabilities, equity...) are ignored.
+    """
+    acc: dict[str, dict] = {}
+    for g in groups:
+        mapped = _GL_TYPE_TO_FIELD.get(g.get("t"))
+        if not mapped or g.get("v") is None or not g.get("m"):
+            continue
+        field, sign = mapped
+        row = acc.setdefault(g["m"], {
+            "m": g["m"], "revenue": 0.0, "cogs": 0.0, "opex": 0.0,
+            "other_income": 0.0, "other_expense": 0.0,
+        })
+        row[field] += sign * g["v"]
+    rows = []
+    for m in sorted(acc, key=lambda x: datetime.strptime(x, "%B %Y")):
+        r = acc[m]
+        for k in ("revenue", "cogs", "opex", "other_income", "other_expense"):
+            r[k] = _round(r[k])
+        rows.append(r)
+    return rows
