@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db.models import AnalyticMonthly, SyncLog
-from app.etl.odoo_pnl import build_pnl, valid_month_labels
+from app.etl.odoo_pnl import build_gl_company, build_pnl, valid_month_labels
 
 
 def _upsert_analytic_monthly(db: Session, kind: str, name: str, month_row: dict, is_complete: bool) -> None:
@@ -52,7 +52,18 @@ def _upsert_analytic_monthly(db: Session, kind: str, name: str, month_row: dict,
     db.execute(stmt)
 
 
-def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict]) -> dict:
+def _try_fetch_gl_company() -> list[dict] | None:
+    """Best-effort ledger pull; a failure here must never break the main sync."""
+    try:
+        from app.config import get_settings
+        from app.etl import odoo_client
+        return odoo_client.fetch_gl_company(get_settings())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict],
+              gl: list[dict] | None = None) -> dict:
     """
     Given already-fetched raw Odoo records, aggregate and persist them.
     Split out from the live fetch so this half can be exercised in tests
@@ -85,8 +96,25 @@ def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict]) 
                 is_complete=row["m"] in complete_labels,
             )
 
+        # Company totals from Odoo's general ledger (ties to its own P&L report).
+        if gl is None:
+            gl = _try_fetch_gl_company()
+        gl_months = build_gl_company(gl) if gl else []
+        for row in gl_months:
+            _upsert_analytic_monthly(
+                db, kind="gl", name="ALL",
+                month_row={"m": row["m"], "revenue": row["revenue"], "cogs": row["cogs"], "opex": row["opex"]},
+                is_complete=True,
+            )
+            _upsert_analytic_monthly(
+                db, kind="gl_other", name="ALL",
+                month_row={"m": row["m"], "revenue": row["other_income"], "cogs": row["other_expense"], "opex": 0.0},
+                is_complete=True,
+            )
+
         db.add(SyncLog(
-            source="odoo", success=True, message=f"{len(result['branches'])} branches synced",
+            source="odoo", success=True,
+            message=f"{len(result['branches'])} branches synced" + (f", {len(gl_months)} ledger months" if gl_months else ", ledger totals unavailable"),
             started_at=started, finished_at=datetime.now(timezone.utc),
         ))
         db.commit()
