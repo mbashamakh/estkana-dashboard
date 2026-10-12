@@ -109,6 +109,9 @@
   .filter-group { display:flex; flex-direction:column; gap:4px; }
   .filter-group label { font-size: 10.5px; color: var(--text-muted); font-weight:600; text-transform:uppercase; letter-spacing:.02em; }
   select { font-family: inherit; border:1px solid var(--border); background: var(--page); color: var(--text-primary); border-radius:8px; padding:6px 10px; font-size:12.5px; min-width:150px; }
+  input[type="date"] { font-family: inherit; border:1px solid var(--border); background: var(--page); color: var(--text-primary); border-radius:8px; padding:5px 8px; font-size:12.5px; color-scheme: light dark; }
+  .date-range { display:flex; align-items:center; gap:6px; }
+  .date-range .to-sep { font-size:11.5px; color: var(--text-muted); }
   .filter-spacer { flex: 1; }
   .scope-line { font-size:11.5px; color: var(--text-muted); }
 
@@ -271,6 +274,14 @@
       <label>Period</label>
       <select id="periodSelect"></select>
     </div>
+    <div class="filter-group" id="customRangeGroup" style="display:none;">
+      <label>From &ndash; To</label>
+      <div class="date-range">
+        <input type="date" id="customFrom" aria-label="From date">
+        <span class="to-sep">to</span>
+        <input type="date" id="customTo" aria-label="To date">
+      </div>
+    </div>
     <div class="filter-group">
       <label>Comparison</label>
       <select id="compareSelect">
@@ -310,7 +321,7 @@
       <div class="source-tag" style="margin:-4px 0 10px;">via Loyverse · net of 15% VAT</div>
       <div class="legend">
         <span class="key"><span class="line" style="background:var(--series-1)"></span>Current period</span>
-        <span class="key" id="legendPrevMonth"><span class="line" style="background:var(--text-muted); border-top:2px dashed var(--text-muted);"></span>Previous month</span>
+        <span class="key" id="legendPrevMonth"><span class="line" style="background:var(--text-muted); border-top:2px dashed var(--text-muted);"></span><span id="legendPrevMonthText">Previous month</span></span>
         <span class="key" id="legendLastYear"><span class="line" style="background:var(--series-2); border-top:2px dotted var(--series-2);"></span>Same period last year</span>
       </div>
       <div class="chart-pos"><svg id="trendChart" width="100%" viewBox="0 0 1320 280"></svg><div class="tooltip" id="tt1"></div></div>
@@ -539,25 +550,59 @@ function initFromData() {
   const periodSel = document.getElementById("periodSelect");
   MONTH_NAMES.forEach((m,i) => { const o = document.createElement("option"); o.value = String(i+1); o.textContent = m + (i===N_MONTHS-1 ? " (month to date)" : ""); periodSel.appendChild(o); });
   { const o = document.createElement("option"); o.value = "ytd"; o.textContent = `Year to date (Jan 1 – ${MONTH_SHORT[N_MONTHS-1]} ${DAILY_START.getFullYear()})`; periodSel.appendChild(o); }
+  { const o = document.createElement("option"); o.value = "custom"; o.textContent = "Custom range…"; periodSel.appendChild(o); }
 
   state = {
     period: String(N_MONTHS),   // default: current (most recent) month, month-to-date
     comparison: "prev_period",  // "prev_period" (previous month) or "prev_year" (same period last year)
     category: "all",
     selected: new Set(DATA.branches.map(b => b.id)), // default: all outlets
+    custom: null,               // {from, to} day indexes (inclusive) once "Custom range…" is chosen
   };
   document.getElementById("periodSelect").value = state.period;
+
+  // Custom range inputs: bounded by the first day and the last day we have data for.
+  const lastIdx = lastDayIdx();
+  const fromEl = document.getElementById("customFrom"), toEl = document.getElementById("customTo");
+  fromEl.min = toEl.min = dateInputValue(0);
+  fromEl.max = toEl.max = dateInputValue(lastIdx);
 }
 
 function dateAtIndex(i) { const d = new Date(DAILY_START); d.setDate(d.getDate()+i); return d; }
 function fmtDate(d) { return MONTH_SHORT[d.getMonth()] + " " + d.getDate(); }
+function dateInputValue(i) {
+  const d = dateAtIndex(i);
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+function indexFromDateInput(v) {
+  if (!v) return null;
+  const d = new Date(v + "T00:00:00");
+  return isNaN(d) ? null : Math.round((d - DAILY_START) / 86400000);
+}
+
+// ---- Custom range ("Custom range…" in the Period dropdown) ----
+// Returns [dS, dE) day offsets into `daily`, or null when a normal month/YTD period is selected.
+function lastDayIdx() { return MONTH_RANGES[N_MONTHS-1][1] - 1; }   // newest day with data (the daily arrays are padded past it)
+function customDayRange() {
+  if (state.period !== "custom" || !state.custom) return null;
+  const last = lastDayIdx();
+  const from = Math.max(0, Math.min(last, state.custom.from));
+  const to = Math.max(from, Math.min(last, state.custom.to));
+  return [from, to + 1];
+}
+function monthIndicesForDays(dS, dE) {
+  const out = [];
+  MONTH_RANGES.forEach((r,i) => { if (r[0] < dE && r[1] > dS) out.push(i+1); });
+  return out;
+}
 
 function monthIndicesFor(period) {
-  if (period === "ytd") return Array.from({length:N_MONTHS}, (_,i)=>i+1);
+  if (period === "custom") { const r = customDayRange(); if (r) return monthIndicesForDays(r[0], r[1]); }
+  if (period === "ytd" || period === "custom") return Array.from({length:N_MONTHS}, (_,i)=>i+1);
   return [parseInt(period,10)];
 }
 function prevMonthIndicesFor(period) {
-  if (period === "ytd") return null;
+  if (period === "ytd" || period === "custom") return null;
   const mi = parseInt(period,10);
   return mi > 1 ? [mi-1] : null;
 }
@@ -567,11 +612,21 @@ function dayRangeForMonths(monthIndices) {
 }
 function periodLabel(period) {
   if (period === "ytd") return "Year to date";
+  if (period === "custom") {
+    const r = customDayRange();
+    if (!r) return "Custom range";
+    const a = dateAtIndex(r[0]), z = dateAtIndex(r[1]-1);
+    const y = z.getFullYear();
+    return r[1]-r[0] === 1 ? `${fmtDate(z)}, ${y}` : `${fmtDate(a)} – ${fmtDate(z)}, ${y}`;
+  }
   return MONTH_NAMES[parseInt(period,10)-1];
 }
 function comparisonLabel() {
-  return state.comparison === "prev_year" ? "same period last year" : "previous month";
+  if (state.comparison === "prev_year") return "same period last year";
+  return state.period === "custom" ? "previous period" : "previous month";
 }
+// Label used for the "previous" trend line / tooltips / comparison dropdown.
+function prevLineLabel() { return state.period === "custom" ? "Previous period" : "Previous month"; }
 
 function visibleBranches() {
   return DATA.branches;
@@ -591,16 +646,36 @@ function sum(arr) { return arr.reduce((a,b)=>a+b,0); }
 // months instead, alongside real_cost_sales (how much of that weighted
 // sales figure came from a real Odoo month, vs. the sample fallback) so
 // callers can tell how much of the result to trust as real.
-function branchMonthlyAgg(b, monthIndices) {
+//
+// dayRange ([dS,dE), optional) is set for a custom date range. Daily sales are
+// real, so sales inside the range are exact; the other monthly line items are
+// only stored per month, so for a month the range covers only partly they are
+// prorated by that month's share of sales falling inside the range (target by
+// days). Whole months inside the range are used as-is.
+function monthWeight(b, r, dayRange) {
+  if (!dayRange) return { w:1, wDays:1, partial:false, sales:r.sales };
+  const [mS, mE] = MONTH_RANGES[r.mi-1];
+  const oS = Math.max(mS, dayRange[0]), oE = Math.min(mE, dayRange[1]);
+  if (oE <= oS) return { w:0, wDays:0, partial:true, sales:0 };
+  if (oS === mS && oE === mE) return { w:1, wDays:1, partial:false, sales:r.sales };
+  let s = 0; for (let i=oS;i<oE;i++) s += (b.daily[i] || 0);
+  const wDays = (oE-oS) / (mE-mS);
+  return { w: r.sales ? s / r.sales : wDays, wDays, partial:true, sales:s };
+}
+function branchMonthlyAgg(b, monthIndices, dayRange) {
   const idxSet = new Set(monthIndices);
   const rows = b.monthly.filter(m => idxSet.has(m.mi));
   const out = { sales:0, orders:0, target:0, discount_amt:0, refund_amt:0, refund_orders:0,
                 waste_value:0, complaints:0, gross_profit:0, contribution:0, real_cost_sales:0 };
   let costWeighted = 0;
   rows.forEach(r => {
-    Object.keys(out).forEach(k => { if (k !== "real_cost_sales") out[k]+=r[k]; });
-    costWeighted += (r.food_cost_pct||0) * r.sales;
-    if (r.food_cost_pct_is_real) out.real_cost_sales += r.sales;
+    const mw = monthWeight(b, r, dayRange);
+    Object.keys(out).forEach(k => {
+      if (k === "real_cost_sales") return;
+      out[k] += r[k] * (k === "target" ? mw.wDays : mw.w);
+    });
+    costWeighted += (r.food_cost_pct||0) * r.sales * mw.w;
+    if (r.food_cost_pct_is_real) out.real_cost_sales += r.sales * mw.w;
   });
   out.food_cost_pct = out.sales ? costWeighted/out.sales : (b.food_cost_pct||0);
   return out;
@@ -608,7 +683,8 @@ function branchMonthlyAgg(b, monthIndices) {
 function computeAgg(branches, period) {
   if (branches.length === 0) return null;
   const monthIndices = monthIndicesFor(period);
-  const [dS, dE] = dayRangeForMonths(monthIndices);
+  const customRange = customDayRange();
+  const [dS, dE] = customRange || dayRangeForMonths(monthIndices);
   const daily = Array(dE-dS).fill(0);
   branches.forEach(b => { for (let i=dS;i<dE;i++) daily[i-dS]+=b.daily[i]; });
 
@@ -618,7 +694,15 @@ function computeAgg(branches, period) {
 
   let dailyPrevMonth = null, salesPrevMonth = null;
   const prevMonthIndices = prevMonthIndicesFor(period);
-  if (prevMonthIndices) {
+  if (customRange) {
+    // Custom range: "previous" = the equally long stretch of days right before it.
+    const len = dE - dS;
+    if (dS - len >= 0) {
+      dailyPrevMonth = Array(len).fill(0);
+      branches.forEach(b => { for (let i=0;i<len;i++) dailyPrevMonth[i]+=b.daily[dS-len+i]; });
+      salesPrevMonth = sum(dailyPrevMonth);
+    }
+  } else if (prevMonthIndices) {
     const [pS,pE] = dayRangeForMonths(prevMonthIndices);
     const raw = Array(pE-pS).fill(0);
     branches.forEach(b => { for (let i=pS;i<pE;i++) raw[i-pS]+=b.daily[i]; });
@@ -638,16 +722,16 @@ function computeAgg(branches, period) {
   const dailyPrev = state.comparison === "prev_year" ? dailyLastYear : dailyPrevMonth;
   const salesPrev = state.comparison === "prev_year" ? salesLastYear : salesPrevMonth;
 
-  const perBranch = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices) }));
+  const perBranch = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices, customRange) }));
   const sales = sum(perBranch.map(x=>x.agg.sales));
-  const orders = sum(perBranch.map(x=>x.agg.orders));
+  const orders = Math.round(sum(perBranch.map(x=>x.agg.orders)));
   const target = sum(perBranch.map(x=>x.agg.target));
   const contribution = sum(perBranch.map(x=>x.agg.contribution));
   const discount_amt = sum(perBranch.map(x=>x.agg.discount_amt));
   const refund_amt = sum(perBranch.map(x=>x.agg.refund_amt));
-  const refund_orders = sum(perBranch.map(x=>x.agg.refund_orders));
+  const refund_orders = Math.round(sum(perBranch.map(x=>x.agg.refund_orders)));
   const waste_value = sum(perBranch.map(x=>x.agg.waste_value));
-  const complaints = sum(perBranch.map(x=>x.agg.complaints));
+  const complaints = Math.round(sum(perBranch.map(x=>x.agg.complaints)));
   const aov = orders ? sales/orders : 0;
 
   // revenue-weighted percentages, weighted by each branch's PERIOD sales
@@ -702,8 +786,9 @@ function computeAgg(branches, period) {
   return { daily, dailyPrev, sales, salesPrev, dailyPrevMonth, salesPrevMonth, dailyLastYear, salesLastYear,
     orders, target, aov, food_cost_pct, food_cost_real_frac, standard_cost_pct, labor_cost_pct,
     waste_pct, discount_pct, refund_pct, inv_variance_pct, rating, gross_margin_pct, gross_profit,
-    contribution, odoo_net: odooNetProfit(branches, monthIndices), categories, items, discount_amt, refund_amt, refund_orders, waste_value, wasteBreakdown,
-    complaints, n_branches: branches.length, monthIndices, dayRange: [dS,dE] };
+    contribution, odoo_net: odooNetProfit(branches, monthIndices, customRange), categories, items, discount_amt, refund_amt, refund_orders, waste_value, wasteBreakdown,
+    complaints, n_branches: branches.length, monthIndices, dayRange: [dS,dE],
+    prorated: !!customRange && monthIndices.some(mi => { const r = MONTH_RANGES[mi-1]; return dS > r[0] || dE < r[1]; }) };
 }
 
 // ---------------- Status helper ----------------
@@ -822,8 +907,21 @@ function contributionSourceTag(frac) {
 // expenses - the selected outlets' share of the HO and CPU cost centers (shares
 // split by each outlet's share of total outlet revenue, same rule as the P&L
 // statement). Only months Odoo has actually posted revenue for are included.
-function odooNetProfit(branches, monthIndices) {
+//
+// For a custom date range (dayRange = [dS,dE)) each Odoo month is counted pro rata
+// by the share of that month's days inside the range.
+function odooNetProfit(branches, monthIndices, dayRange) {
   if (!PNL) return null;
+  if (dayRange) {
+    let net = 0, months = 0, any = false;
+    monthIndices.forEach(mi => {
+      const [mS, mE] = MONTH_RANGES[mi-1];
+      const frac = (Math.min(mE, dayRange[1]) - Math.max(mS, dayRange[0])) / (mE - mS);
+      const one = odooNetProfit(branches, [mi]);
+      if (one && frac > 0) { net += one.net * frac; months += 1; any = true; }
+    });
+    return any ? { net, months, requested: monthIndices.length } : null;
+  }
   const requested = monthIndices.map(i => String(MONTH_NAMES[i-1]).replace(/\s*\(.*$/, ""));
   const posted = new Set(PNL.branch_rollup.months.filter(m => m.revenue > 0).map(m => m.m));
   const labels = requested.filter(l => posted.has(l));
@@ -856,7 +954,7 @@ function renderKPIs(agg) {
     { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:costSourceTag(agg.food_cost_real_frac) },
     agg.odoo_net
       ? { label: "Net Profit", value: fmtSAR(agg.odoo_net.net, true), sub: "after HO & CPU share (as in Odoo)", accent:"var(--series-2)",
-          source: "Odoo (real)" + (agg.odoo_net.months < agg.odoo_net.requested ? ` — ${agg.odoo_net.months} of ${agg.odoo_net.requested} selected months posted in Odoo` : "") }
+          source: "Odoo (real)" + (agg.prorated ? " — prorated by days" : "") + (agg.odoo_net.months < agg.odoo_net.requested ? ` — ${agg.odoo_net.months} of ${agg.odoo_net.requested} selected months posted in Odoo` : "") }
       : { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs (Odoo not posted yet)", accent:"var(--series-2)", source:contributionSourceTag(agg.food_cost_real_frac) },
   ];
   grid.innerHTML = "";
@@ -884,6 +982,7 @@ function renderTrend(agg) {
   const hasPrevMonth = !!agg.dailyPrevMonth;
   const hasLastYear = !!agg.dailyLastYear;
   document.getElementById("legendPrevMonth").style.display = hasPrevMonth ? "" : "none";
+  document.getElementById("legendPrevMonthText").textContent = prevLineLabel();
   document.getElementById("legendLastYear").style.display = hasLastYear ? "" : "none";
   const maxV = Math.max(...agg.daily, ...(hasPrevMonth?agg.dailyPrevMonth:[0]), ...(hasLastYear?agg.dailyLastYear:[0])) * 1.15;
   const yScale = v => padT + plotH - (v/maxV)*plotH;
@@ -914,7 +1013,7 @@ function renderTrend(agg) {
   });
   agg.daily.forEach((v,i) => {
     const dt = dateAtIndex(agg.dayRange[0]+i);
-    const prevMonthLine = hasPrevMonth ? `<br>${fmtSAR(agg.dailyPrevMonth[i])} previous month` : "";
+    const prevMonthLine = hasPrevMonth ? `<br>${fmtSAR(agg.dailyPrevMonth[i])} ${prevLineLabel().toLowerCase()}` : "";
     const lastYearLine = hasLastYear ? `<br>${fmtSAR(agg.dailyLastYear[i])} same period last year` : "";
     s += `<circle class="pt" data-tip="${fmtDate(dt)}<br><span class='t-val'>${fmtSAR(v)}</span> current${prevMonthLine}${lastYearLine}" cx="${xScale(i)}" cy="${yScale(v)}" r="9" fill="transparent"/>`;
   });
@@ -1034,7 +1133,8 @@ function renderTraffic(agg) {
 function renderRanking(period) {
   const branches = visibleBranches();
   const monthIndices = monthIndicesFor(period);
-  const scored = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices) }));
+  const customRange = customDayRange();
+  const scored = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices, customRange) }));
   const ranked = [...scored].sort((a,c)=>c.agg.contribution-a.agg.contribution);
   // Period-weighted, real-Odoo-where-posted food cost % (agg.food_cost_pct
   // from branchMonthlyAgg) — not the flat all-time branch scalar, which
@@ -1338,7 +1438,9 @@ function render() {
   if (!agg) return;
 
   document.getElementById("scopeLine").textContent =
-    `Showing: ${branches.length === vb.length ? "All branches" : branches.map(b=>b.name).join(", ")} · ${periodLabel(state.period)} · ${state.category==="all"?"all categories":state.category}`;
+    `Showing: ${branches.length === vb.length ? "All branches" : branches.map(b=>b.name).join(", ")} · ${periodLabel(state.period)} · ${state.category==="all"?"all categories":state.category}` +
+    (agg.prorated ? " · Sales are exact for the chosen days; cost, profit, category and item figures are monthly data prorated by days (estimates)." : "");
+  document.querySelector("#compareSelect option[value=prev_period]").textContent = "vs. " + (state.period === "custom" ? "Previous period" : "Previous month");
 
   renderKPIs(agg);
   renderTrend(agg);
@@ -1356,7 +1458,37 @@ function render() {
 // its <option>s actually exist -- this used to run here at parse time
 // against the old hardcoded DATA blob, which no longer works now that
 // state/period options come from an async fetch.)
-document.getElementById("periodSelect").addEventListener("change", e => { state.period = e.target.value; render(); });
+function syncCustomRangeUI() {
+  const grp = document.getElementById("customRangeGroup");
+  grp.style.display = state.period === "custom" ? "" : "none";
+  if (state.period === "custom" && state.custom) {
+    document.getElementById("customFrom").value = dateInputValue(state.custom.from);
+    document.getElementById("customTo").value = dateInputValue(state.custom.to);
+  }
+}
+document.getElementById("periodSelect").addEventListener("change", e => {
+  state.period = e.target.value;
+  if (state.period === "custom" && !state.custom) {
+    // start from the most recent month-to-date, then let the user adjust
+    const last = lastDayIdx();
+    state.custom = { from: MONTH_RANGES[N_MONTHS-1][0], to: last };
+  }
+  syncCustomRangeUI();
+  render();
+});
+function onCustomDateChange(ev) {
+  let f = indexFromDateInput(document.getElementById("customFrom").value);
+  let t = indexFromDateInput(document.getElementById("customTo").value);
+  if (f === null || t === null) return;          // half-typed date: wait for a full one
+  const last = lastDayIdx();
+  f = Math.max(0, Math.min(last, f)); t = Math.max(0, Math.min(last, t));
+  if (t < f) { if (ev && ev.target && ev.target.id === "customTo") f = t; else t = f; }   // keep From <= To: the date just edited wins
+  state.custom = { from: f, to: t };
+  syncCustomRangeUI();
+  render();
+}
+document.getElementById("customFrom").addEventListener("change", onCustomDateChange);
+document.getElementById("customTo").addEventListener("change", onCustomDateChange);
 document.getElementById("compareSelect").addEventListener("change", e => { state.comparison = e.target.value; render(); });
 document.getElementById("categorySelect").addEventListener("change", e => { state.category = e.target.value; render(); });
 
