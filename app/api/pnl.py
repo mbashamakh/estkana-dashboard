@@ -5,6 +5,8 @@ of a hardcoded blob. Login-gated (see auth.routes.get_current_user).
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -118,6 +120,36 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
             "net_margin_pct": round(np_ / m["revenue"] * 100, 2) if m["revenue"] else None,
         })
 
+    # Odoo general-ledger company totals (kinds "gl" + "gl_other"): these tie to
+    # Odoo's own Profit & Loss report, so they supersede the analytic sum.
+    gl_rows = db.scalars(
+        select(AnalyticMonthly).where(AnalyticMonthly.kind == "gl", AnalyticMonthly.name == "ALL")
+    ).all()
+    gl_other = {r.month: r for r in db.scalars(
+        select(AnalyticMonthly).where(AnalyticMonthly.kind == "gl_other", AnalyticMonthly.name == "ALL")
+    ).all()}
+    gl_months = []
+    for row in sorted(gl_rows, key=lambda r: datetime.strptime(r.month, "%B %Y")):
+        oth = gl_other.get(row.month)
+        oi = oth.revenue if oth else 0.0
+        oe = oth.cogs if oth else 0.0
+        m = _month_row_from_db(row)
+        net = round(m["gross_profit"] - m["opex"] + oi - oe, 2)
+        m.update({
+            "other_income": oi, "other_expense": oe, "net_profit": net,
+            "net_margin_pct": round(net / row.revenue * 100, 2) if row.revenue else None,
+        })
+        gl_months.append(m)
+    gl_ytd = None
+    if gl_months:
+        gl_ytd = ytd_from_months(gl_months)
+        oi = round(sum(x["other_income"] for x in gl_months), 2)
+        oe = round(sum(x["other_expense"] for x in gl_months), 2)
+        gl_ytd["other_income"], gl_ytd["other_expense"] = oi, oe
+        gl_ytd["net_profit"] = round(gl_ytd["gross_profit"] - gl_ytd["opex"] + oi - oe, 2)
+        gl_ytd["net_margin_pct"] = round(gl_ytd["net_profit"] / gl_ytd["revenue"] * 100, 2) if gl_ytd["revenue"] else None
+    gl_company = {"months": gl_months, "ytd": gl_ytd} if gl_months else None
+
     last_sync = db.scalars(
         select(SyncLog).where(SyncLog.source == "odoo", SyncLog.success == True).order_by(SyncLog.finished_at.desc())  # noqa: E712
     ).first()
@@ -127,7 +159,8 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         "last_synced_at": last_sync.finished_at.isoformat() if last_sync else None,
         "branches": branches,
         "branch_rollup": {"months": rollup_months, "ytd": ytd_from_months(rollup_months)},
-        "company_total": {"months": company_months, "ytd": ytd_from_months(company_months)},
+        "company_total": gl_company or {"months": company_months, "ytd": ytd_from_months(company_months)},
+        "gl_company": gl_company,
         "overhead": {"months": overhead_months},
         "ho": {"months": ho_months, "cost_center": "[HO] HO"},
         "cpu": {"months": cpu_months, "cost_center": "[CPU] CPU"},
