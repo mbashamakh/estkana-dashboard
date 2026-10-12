@@ -946,7 +946,16 @@ function odooNetProfit(branches, monthIndices, dayRange) {
   const share = rollRev ? rev / rollRev : 0;
   const ho = -pnlAggMonths(PNL.ho.months, labels).net_profit;
   const cpu = -pnlAggMonths(PNL.cpu.months, labels).net_profit;
-  return { net: gpLessOpex - (ho + cpu) * share, months: labels.length, requested: requested.length };
+  // Everything in Odoo's ledger that is not on an outlet / HO / CPU analytic account
+  // (other overheads, other income, untagged entries) is shared out by revenue too,
+  // so that selecting all branches ties exactly to Odoo's own Net Profit.
+  let extra = 0;
+  if (PNL.gl_company && labels.every(l => PNL.gl_company.months.some(m => m.m === l))) {
+    const roll = pnlAggMonths(PNL.branch_rollup.months, labels);
+    const outletsNet = roll.gross_profit - roll.opex - ho - cpu;
+    extra = (pnlAggMonths(PNL.gl_company.months, labels).net_profit - outletsNet) * share;
+  }
+  return { net: gpLessOpex - (ho + cpu) * share + extra, months: labels.length, requested: requested.length };
 }
 
 // ---------------- Render: KPI cards ----------------
@@ -961,7 +970,7 @@ function renderKPIs(agg) {
     { label: "Average Order Value", value: fmtSAR(agg.aov), sub: "Total sales ÷ orders", accent:"var(--series-4)", source:"Loyverse" },
     { label: "Gross Margin %", value: pct(agg.gross_margin_pct,0), sub: fmtSAR(agg.gross_profit,true)+" gross profit", accent:"var(--series-1)", source:costSourceTag(agg.food_cost_real_frac) },
     agg.odoo_net
-      ? { label: "Net Profit", value: fmtSAR(agg.odoo_net.net, true), sub: "after HO & CPU share (as in Odoo)", accent:"var(--series-2)",
+      ? { label: "Net Profit", value: fmtSAR(agg.odoo_net.net, true), sub: (PNL && PNL.gl_company ? "after overheads & other income (as in Odoo)" : "after HO & CPU share (as in Odoo)"), accent:"var(--series-2)",
           source: "Odoo (real)" + (agg.prorated ? " — prorated by days" : "") + (agg.odoo_net.months < agg.odoo_net.requested ? ` — ${agg.odoo_net.months} of ${agg.odoo_net.requested} selected months posted in Odoo` : "") }
       : { label: "Net Profit", value: fmtSAR(agg.contribution, true), sub: "after direct operating costs (Odoo not posted yet)", accent:"var(--series-2)", source:contributionSourceTag(agg.food_cost_real_frac) },
   ];
@@ -1332,8 +1341,12 @@ function pnlAggMonths(monthsArr, labels) {
   const cogs = sum(rows.map(r=>r.cogs));
   const opex = sum(rows.map(r=>r.opex));
   const gross_profit = revenue - cogs;
-  const net_profit = gross_profit - opex;
-  return { revenue, cogs, opex, gross_profit, net_profit,
+  // Other income / other expenses exist only on the ledger-based company total (Odoo's
+  // "Other Income" / "Other Expenses" lines); every other series has none (= 0).
+  const other_income = sum(rows.map(r=>r.other_income||0));
+  const other_expense = sum(rows.map(r=>r.other_expense||0));
+  const net_profit = gross_profit - opex + other_income - other_expense;
+  return { revenue, cogs, opex, gross_profit, net_profit, other_income, other_expense,
     gross_margin_pct: revenue ? gross_profit/revenue*100 : null,
     net_margin_pct: revenue ? net_profit/revenue*100 : null };
 }
@@ -1382,7 +1395,7 @@ function renderPnL() {
   if (pnlState.outlet === "all") {
     stmtAgg = rollupAgg;
     contributionPct = 100;
-    stmtLabel = "Outlets only (19 branches)";
+    stmtLabel = PNL.gl_company ? "All outlets + overheads (as in Odoo)" : "Outlets only (19 branches)";
   } else {
     const branch = PNL.branches.find(b => b.odoo_name === pnlState.outlet);
     stmtAgg = pnlAggMonths(branch.months, labels);
@@ -1391,7 +1404,20 @@ function renderPnL() {
   }
   const hoShare = totalHO * contributionPct / 100;
   const cpuShare = totalCPU * contributionPct / 100;
-  const stmtNetProfit = stmtAgg.gross_profit - stmtAgg.opex - hoShare - cpuShare;
+  // Bridge to Odoo's ledger (All Outlets only): what Odoo books outside the outlet, HO and
+  // CPU analytic accounts, so the statement's Net profit equals Odoo's Profit & Loss.
+  const glOk = pnlState.outlet === "all" && PNL.gl_company &&
+    labels.every(l => PNL.gl_company.months.some(m => m.m === l));
+  let bridge = null;
+  if (glOk) {
+    const g = pnlAggMonths(PNL.gl_company.months, labels);
+    bridge = {
+      unGP: g.gross_profit - rollupAgg.gross_profit,
+      otherOH: g.opex - rollupAgg.opex - totalHO - totalCPU,
+      oi: g.other_income, oe: g.other_expense, net: g.net_profit,
+    };
+  }
+  const stmtNetProfit = bridge ? bridge.net : stmtAgg.gross_profit - stmtAgg.opex - hoShare - cpuShare;
   const stmtNetMarginPct = stmtAgg.revenue ? stmtNetProfit/stmtAgg.revenue*100 : null;
 
   document.getElementById("pnlStatementSub").textContent = stmtLabel + " · " + periodLabelText;
@@ -1406,8 +1432,16 @@ function renderPnL() {
     {label:"CPU share", value: -cpuShare, sub: pnlState.outlet === "all"
       ? "From the CPU analytic account only (excludes HO and other overhead)"
       : `${contributionPct.toFixed(1)}% of CPU account cost — this outlet's share of company revenue`},
-    {label:"Net profit", value: stmtNetProfit, total:true, sub: pnlPct(stmtNetMarginPct)+" net margin"},
   ];
+  if (bridge) {
+    rows.push({label:"Other overheads & unallocated", value: -bridge.otherOH,
+      sub:"Other cost centers (FIN, GM, HR, Kaftrea, Maintenance, Operation) and any Opex not on an outlet/HO/CPU account"});
+    if (Math.abs(bridge.unGP) >= 0.5) rows.push({label:"Revenue less COGS outside outlets", value: bridge.unGP,
+      sub:"Ledger entries with no outlet analytic account"});
+    rows.push({label:"Other income", value: bridge.oi});
+    rows.push({label:"Other expenses", value: -bridge.oe});
+  }
+  rows.push({label:"Net profit", value: stmtNetProfit, total:true, sub: pnlPct(stmtNetMarginPct)+" net margin" + (bridge ? " · ties to Odoo Profit & Loss" : "")});
   document.getElementById("pnlStatementTable").innerHTML = rows.map(r => `
     <tr class="statement-row${r.total?" total":""}"><td>${r.label}</td><td class="num" style="${r.value<0?'color:var(--critical)':''}">${fmtSAR(r.value)}</td></tr>
     ${r.sub ? `<tr class="statement-row sub"><td colspan="2">${r.sub}</td></tr>` : ""}
@@ -1427,8 +1461,15 @@ function renderPnL() {
   // By-outlet table
   let branchRows = PNL.branches.map(b => ({ b, agg: pnlAggMonths(b.months, labels) }));
   if (pnlState.scope === "company") {
-    const oh = pnlAggMonths(PNL.overhead.months, labels);
-    branchRows.push({ b: {odoo_name:"HQ / shared overhead", loyverse_name:"— (not outlet-level)"}, agg: oh, isOverhead:true });
+    let oh = pnlAggMonths(PNL.overhead.months, labels), ohName = "HQ / shared overhead";
+    if (PNL.gl_company && labels.every(l => PNL.gl_company.months.some(m => m.m === l))) {
+      // company (ledger) total minus the outlets = overheads + other income + untagged entries
+      oh = { revenue: companyAgg.revenue - rollupAgg.revenue, cogs: companyAgg.cogs - rollupAgg.cogs,
+        gross_profit: companyAgg.gross_profit - rollupAgg.gross_profit, opex: companyAgg.opex - rollupAgg.opex,
+        net_profit: companyAgg.net_profit - rollupAgg.net_profit, gross_margin_pct: null, net_margin_pct: null };
+      ohName = "HQ / shared overhead & other income";
+    }
+    branchRows.push({ b: {odoo_name:ohName, loyverse_name:"— (not outlet-level)"}, agg: oh, isOverhead:true });
   }
   branchRows.sort((x,y) => (y.agg.net_margin_pct ?? -999) - (x.agg.net_margin_pct ?? -999));
   document.getElementById("pnlBranchTable").innerHTML = branchRows.map(({b,agg,isOverhead}) => `
