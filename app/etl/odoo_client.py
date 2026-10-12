@@ -115,6 +115,28 @@ def _pull_group(settings: Settings, uid: int, code_prefix: str, date_from: str =
     return records
 
 
+def fetch_gl_company(settings: Settings, date_from: str = "2026-01-01") -> list[dict]:
+    """
+    Posted general-ledger balances by account type and month — the basis of
+    Odoo's own Profit & Loss report. Returns [{"t", "m", "v"}] for
+    odoo_pnl.build_gl_company().
+    """
+    uid = _authenticate(settings)
+    domain = [("parent_state", "=", "posted"), ("date", ">=", date_from)]
+    groups = _execute_kw(
+        settings, uid, "account.move.line", "read_group",
+        [domain, ["balance:sum"], ["account_type", _MONTH_GROUPBY]],
+        {"lazy": False},
+    )
+    out = []
+    for g in groups:
+        t, m, v = g.get("account_type"), g.get(_MONTH_GROUPBY), g.get("balance")
+        if not t or not m or v is None:
+            continue
+        out.append({"t": t, "m": m, "v": round(v, 2)})
+    return out
+
+
 def fetch_records(settings: Settings) -> tuple[list[dict], list[dict], list[dict]]:
     """Returns (rev_records, cogs_records, opex_records) in the {"a","n","m","v"} shape."""
     if not settings.odoo_configured:
