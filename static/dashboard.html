@@ -1359,13 +1359,19 @@ function renderPnL() {
   const agg = pnlState.scope === "company" ? companyAgg : rollupAgg;
 
   // KPI strip
+  // Net Profit is always the company figure from Odoo's ledger when available, so it ties to
+  // Odoo's Profit & Loss in both scopes (the outlet rows above it are before HQ costs).
+  const kpiLedger = !!PNL.gl_company && labels.every(l => PNL.gl_company.months.some(m => m.m === l));
+  const kpiNet = kpiLedger ? companyAgg : agg;
   const kpiGrid = document.getElementById("pnlKpiGrid");
   const cards = [
     { label: "Revenue", value: fmtSAR(agg.revenue, true), sub: "posted in period", accent:"var(--series-1)" },
     { label: "COGS", value: fmtSAR(agg.cogs, true), sub: pnlPct(agg.revenue ? agg.cogs/agg.revenue*100 : null) + " of revenue", accent:"var(--series-2)" },
     { label: "Gross Profit", value: fmtSAR(agg.gross_profit, true), sub: pnlPct(agg.gross_margin_pct) + " gross margin", accent:"var(--series-3)" },
     { label: "Operating Expenses", value: fmtSAR(agg.opex, true), sub: pnlPct(agg.revenue ? agg.opex/agg.revenue*100 : null) + " of revenue", accent:"var(--series-4)" },
-    { label: "Net Profit", value: fmtSAR(agg.net_profit, true), sub: pnlPct(agg.net_margin_pct) + " net margin", accent: agg.net_profit>=0 ? "var(--good)" : "var(--critical)" },
+    { label: "Net Profit", value: fmtSAR(kpiNet.net_profit, true),
+      sub: pnlPct(kpiNet.net_margin_pct) + " net margin" + (kpiLedger ? " · after all overheads & other income (as in Odoo)" : ""),
+      accent: kpiNet.net_profit>=0 ? "var(--good)" : "var(--critical)" },
   ];
   kpiGrid.innerHTML = "";
   cards.forEach(c => {
@@ -1452,7 +1458,7 @@ function renderPnL() {
     {label:"Revenue", a: fmtSAR(rollupAgg.revenue,true), b: fmtSAR(companyAgg.revenue,true)},
     {label:"Gross margin %", a: pnlPct(rollupAgg.gross_margin_pct), b: pnlPct(companyAgg.gross_margin_pct)},
     {label:"Operating expenses", a: fmtSAR(rollupAgg.opex,true), b: fmtSAR(companyAgg.opex,true)},
-    {label:"Net profit", a: fmtSAR(rollupAgg.net_profit,true), b: fmtSAR(companyAgg.net_profit,true)},
+    {label:"Net profit", a: fmtSAR(rollupAgg.net_profit,true) + (PNL.gl_company ? " (before HQ costs)" : ""), b: fmtSAR(companyAgg.net_profit,true)},
     {label:"Net margin %", a: pnlPct(rollupAgg.net_margin_pct), b: pnlPct(companyAgg.net_margin_pct)},
   ];
   document.getElementById("pnlCompareTable").innerHTML = cmpRows.map(r =>
