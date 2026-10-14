@@ -109,6 +109,10 @@ class LoyverseDaily(Base):
     discount_amt: Mapped[float] = mapped_column(Float, default=0.0)
     refund_amt: Mapped[float] = mapped_column(Float, default=0.0)
     line_items: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Sales by Saudi clock hour: {"13": {"s": net sales incl. VAT, "o": orders}, ...}.
+    # NULL = the day was stored before hourly data existed (not yet re-pulled);
+    # {} = re-pulled and had no hourly activity. Feeds /api/hourly (Peak Sales Hours).
+    hours: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
