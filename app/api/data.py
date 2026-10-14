@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.auth.routes import get_current_user
 from app.db.session import get_db
 from app.db.models import LoyverseDaily
-from app.etl.data_builder import REAL_BRANCH_NAMES, build_data_response, ex_vat
+from app.etl.data_builder import REAL_BRANCH_NAMES, build_data_response, ex_vat, uncosted_items
 from app.etl.odoo_pnl import LOYVERSE_MAP
 
 router = APIRouter()
@@ -73,4 +73,48 @@ def get_hourly(date_from: str, date_to: str, db: Session = Depends(get_db), _use
         "date_from": d0.isoformat(), "date_to": d1.isoformat(),
         "branches": out,
         "coverage": {"branch_days": total, "with_hours": covered},
+    }
+
+
+@router.get("/api/uncosted")
+def get_uncosted(date_from: str, date_to: str, db: Session = Depends(get_db), _user=Depends(get_current_user)):
+    """
+    Items sold in date_from..date_to (inclusive) that have NO cost in the
+    recipe sheet, summed over all real branches (qty, ex-VAT sales), biggest
+    first. Same matching rule as meta.uncosted_items in /api/data.
+    """
+    try:
+        d0 = date.fromisoformat(date_from)
+        d1 = date.fromisoformat(date_to)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date_from/date_to must be YYYY-MM-DD")
+    if d1 < d0 or (d1 - d0).days > 400:
+        raise HTTPException(status_code=400, detail="invalid date range")
+    rows = db.execute(
+        select(LoyverseDaily.line_items).where(
+            LoyverseDaily.branch.in_(REAL_BRANCH_NAMES),
+            LoyverseDaily.date >= d0.isoformat(),
+            LoyverseDaily.date <= d1.isoformat(),
+        )
+    ).all()
+    agg: dict[str, dict] = {}
+    total_sales = 0.0
+    for (li,) in rows:
+        for name, info in (li or {}).items():
+            e = agg.setdefault(name, {"name": name, "cat": info.get("cat"), "qty": 0.0, "sales": 0.0})
+            e["qty"] += info.get("qty", 0)
+            e["sales"] += ex_vat(info.get("sales", 0.0))
+            total_sales += ex_vat(info.get("sales", 0.0))
+    cats = {n: v["cat"] for n, v in agg.items()}
+    out = uncosted_items(agg)
+    for o in out:
+        o["cat"] = cats.get(o["name"])
+    out.sort(key=lambda x: -x["sales"])
+    unc_sales = sum(o["sales"] for o in out)
+    return {
+        "date_from": d0.isoformat(), "date_to": d1.isoformat(),
+        "total_sales": round(total_sales, 2),
+        "uncosted_sales": round(unc_sales, 2),
+        "uncosted_sales_pct": round(unc_sales / total_sales * 100, 2) if total_sales else 0.0,
+        "items": out,
     }
