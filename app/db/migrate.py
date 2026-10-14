@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 
 def run_startup_migrations(engine: Engine) -> None:
     _rename_loyverse_daily_items_column(engine)
+    _add_loyverse_daily_hours_column(engine)
 
 
 def _rename_loyverse_daily_items_column(engine: Engine) -> None:
@@ -40,3 +41,17 @@ def _rename_loyverse_daily_items_column(engine: Engine) -> None:
 
     with engine.begin() as conn:
         conn.exec_driver_sql("ALTER TABLE loyverse_daily RENAME COLUMN items TO line_items")
+
+
+def _add_loyverse_daily_hours_column(engine: Engine) -> None:
+    """Adds loyverse_daily.hours (per-hour sales/orders, see LoyverseDaily).
+    create_all() never alters an existing table, so an already-deployed DB
+    needs this one-off ALTER; IF NOT EXISTS keeps it safe on every startup."""
+    inspector = inspect(engine)
+    if "loyverse_daily" not in inspector.get_table_names():
+        return  # fresh DB -- create_all() builds the table with the column
+    columns = {c["name"] for c in inspector.get_columns("loyverse_daily")}
+    if "hours" in columns:
+        return
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE loyverse_daily ADD COLUMN IF NOT EXISTS hours JSON")
