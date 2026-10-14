@@ -97,13 +97,14 @@ def _upsert_day(db: Session, branch: str, date: str, day_data: dict) -> None:
         sales=day_data["sales"], orders=day_data["orders"],
         discount_amt=day_data["discount_amt"], refund_amt=day_data["refund_amt"],
         line_items=day_data["items"],
+        hours=day_data.get("hours", {}),
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["branch", "date"],
         set_={
             "sales": stmt.excluded.sales, "orders": stmt.excluded.orders,
             "discount_amt": stmt.excluded.discount_amt, "refund_amt": stmt.excluded.refund_amt,
-            "line_items": stmt.excluded.line_items, "updated_at": datetime.now(timezone.utc),
+            "line_items": stmt.excluded.line_items, "hours": stmt.excluded.hours, "updated_at": datetime.now(timezone.utc),
         },
     )
     db.execute(stmt)
