@@ -508,7 +508,7 @@
   </section>
 
   <footer>
-    Sales, orders, AOV, discounts, refunds, category mix and top products are live from Loyverse (updated hourly; 2026 history backfills gradually — see the sync note above the filters). P&amp;L figures are live from Odoo. Labor cost % (Odoo staff-cost accounts 611/612) and actual cost % are live from Odoo; standard cost % comes from the recipe sheet. Customer rating, complaints, waste and peak hours have no data source yet and show "No data yet" instead of placeholder numbers. Filters recompute every card and chart from the same underlying dataset.
+    Sales, orders, AOV, discounts, refunds, category mix and top products are live from Loyverse (updated hourly; 2026 history backfills gradually — see the sync note above the filters). P&amp;L figures are live from Odoo. Labor cost % (Odoo staff-cost accounts 611/612) and actual cost % are live from Odoo; standard cost % comes from the recipe sheet. Peak sales hours come from Loyverse receipts. The sales target is the same days last year plus the recent year-over-year trend. Customer rating, complaints and waste have no data source yet and show "No data yet" instead of placeholder numbers. Filters recompute every card and chart from the same underlying dataset.
   </footer>
 
 </div>
@@ -1234,8 +1234,52 @@ function renderCostGaps() {
 }
 
 // ---------------- Render: Traffic light table ----------------
-function renderTraffic(agg) {
+// Sales target = the same days last year (real Loyverse, ex-VAT) grown by the company's recent
+// year-over-year trend: the last 3 complete months vs the same months last year, floored at 0
+// and capped at +50%. Only "same-store" branches count (on both sides): those that traded on at
+// least 90% of the days in the window this year AND last year, so a branch opened since then
+// can't inflate the trend or the attainment.
+function sameStore(b, dS, dE) {
+  let c = 0, l = 0, dc = 0, dl = 0;
+  for (let i = dS; i < dE; i++) {
+    const x = b.daily[i] || 0, y = b.daily_ly[i] || 0;
+    c += x; l += y; if (x > 0) dc++; if (y > 0) dl++;
+  }
+  const n = dE - dS;
+  return { c, l, ok: n > 0 && dc >= 0.9 * n && dl >= 0.9 * n };
+}
+let SALES_TREND = null;
+function salesTrend() {
+  if (SALES_TREND !== null) return SALES_TREND;
+  let g = 0;
+  const lastIdx = N_MONTHS - 2;                       // newest COMPLETE month (the last one is month-to-date)
+  if (lastIdx >= 0) {
+    const firstIdx = Math.max(0, lastIdx - 2);
+    const dS = MONTH_RANGES[firstIdx][0], dE = MONTH_RANGES[lastIdx][1];
+    let cur = 0, ly = 0;
+    DATA.branches.forEach(b => { const s = sameStore(b, dS, dE); if (s.ok) { cur += s.c; ly += s.l; } });
+    if (ly > 0) g = Math.min(0.5, Math.max(0, cur / ly - 1));
+  }
+  SALES_TREND = g;
+  return g;
+}
+function salesTargetFor(branches, dS, dE) {
+  const g = salesTrend();
+  let target = 0, actual = 0, used = 0;
+  branches.forEach(b => {
+    const s = sameStore(b, dS, dE);
+    if (s.ok) { target += s.l * (1 + g); actual += s.c; used++; }
+  });
+  return used ? { target, actual, used, total: branches.length, g } : null;
+}
+
+function renderTraffic(agg, branches) {
+  const st0 = salesTargetFor(branches, agg.dayRange[0], agg.dayRange[1]);
   const rows = [
+    st0
+      ? {kpi:`Sales vs Target<div style="font-size:11px;color:var(--text-muted);font-weight:400;">${fmtSAR(st0.actual, true)} of ${fmtSAR(st0.target, true)} · same days last year +${(st0.g*100).toFixed(1)}% (recent trend)${st0.used < st0.total ? " · " + st0.used + " of " + st0.total + " branches (others are new or closed on too many days)" : ""}</div>`,
+         actual: st0.actual / st0.target * 100, target: 100, dir:"gte", warn:5, fmt:v => v.toFixed(0) + "%"}
+      : {kpi:"Sales vs Target", actual: null, target: 100, dir:"gte", warn:5, fmt:v => v.toFixed(0) + "%"},
     {kpi:"Food Cost", actual: agg.food_cost_pct, target: 30, dir:"lte", warn:2, fmt:pct},
     {kpi:"Labor Cost", actual: agg.labor_cost_pct, target: 20, dir:"lte", warn:2, fmt:pct},
     {kpi:"Discounts", actual: agg.discount_pct, target: 3, dir:"lte", warn:1.5, fmt:pct},
@@ -1767,7 +1811,7 @@ function render() {
   renderTrend(agg);
   renderCategory(agg);
   renderCostGrid(agg);
-  renderTraffic(agg);
+  renderTraffic(agg, branches);
   renderRanking(state.period);
   renderProducts(agg);
   renderCustomer(agg, branches);
