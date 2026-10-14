@@ -137,6 +137,31 @@ def fetch_gl_company(settings: Settings, date_from: str = "2026-01-01") -> list[
     return out
 
 
+def fetch_labor(settings: Settings, date_from: str = "2026-01-01") -> list[dict]:
+    """
+    Staff cost (GL accounts starting 611 or 612) per analytic account and
+    month, in the {"a","n","m","v"} shape build_labor() expects.
+    """
+    uid = _authenticate(settings)
+    domain = [
+        "|", ("general_account_id.code", "=like", "611%"), ("general_account_id.code", "=like", "612%"),
+        ("date", ">=", date_from),
+        ("move_line_id.parent_state", "=", "posted"),
+    ]
+    groups = _execute_kw(
+        settings, uid, "account.analytic.line", "read_group",
+        [domain, ["amount"], ["account_id", _MONTH_GROUPBY]],
+        {"lazy": False},
+    )
+    out = []
+    for g in groups:
+        account, month, amount = g.get("account_id"), g.get(_MONTH_GROUPBY), g.get("amount")
+        if not account or not month or amount is None:
+            continue
+        out.append({"a": account[0], "n": account[1], "m": month, "v": round(amount, 2)})
+    return out
+
+
 def fetch_records(settings: Settings) -> tuple[list[dict], list[dict], list[dict]]:
     """Returns (rev_records, cogs_records, opex_records) in the {"a","n","m","v"} shape."""
     if not settings.odoo_configured:
