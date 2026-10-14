@@ -169,6 +169,10 @@
   .legend .key { display:inline-flex; align-items:center; gap:6px; }
   .legend .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
   .legend .line { width:14px; height:2px; display:inline-block; }
+  .seg { display:inline-flex; margin-left:auto; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .seg button { background:transparent; border:0; padding:5px 12px; font:inherit; font-size:12px; color:var(--text-secondary); cursor:pointer; }
+  .seg button.on { background:var(--series-1); color:#fff; }
+  .seg button:focus-visible { outline:2px solid var(--series-1); outline-offset:-2px; }
 
   svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   .axis-label { fill: var(--text-muted); font-size: 10px; }
@@ -409,6 +413,22 @@
     <div class="section-title">Customer &amp; operations snapshot</div>
     <div class="card">
       <div class="kpi-grid" id="custGrid" style="grid-template-columns:repeat(5,1fr);"></div>
+    </div>
+  </section>
+
+  <!-- Peak sales hours -->
+  <section>
+    <div class="card">
+      <div class="row-title"><div class="section-title">Peak sales hours</div>
+        <div class="seg" id="hoursMetric" role="group" aria-label="Chart metric"><button type="button" data-m="sales" class="on">Sales</button><button type="button" data-m="orders">Orders</button></div></div>
+      <div class="section-sub" id="hoursSub">Sales by hour of the day, selected branches and period</div>
+      <div class="source-tag" style="margin:-4px 0 10px;">via Loyverse receipts · Saudi time · net of 15% VAT</div>
+      <div class="legend">
+        <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Top 3 hours</span>
+        <span class="key"><span class="swatch" style="background:var(--series-1);opacity:.32"></span>Other hours</span>
+      </div>
+      <div class="chart-pos"><svg id="hoursChart" width="100%" viewBox="0 0 1320 260" role="img" aria-label="Sales by hour of the day"></svg><div class="tooltip" id="ttHours"></div></div>
+      <div class="section-sub" id="hoursNote" style="margin-top:8px;"></div>
     </div>
   </section>
 
@@ -1318,7 +1338,7 @@ function renderCustomer(agg, branches) {
     {label:"Customer Rating", value: "No data yet", accent:"var(--series-1)"},
     {label:"Complaints", value: "No data yet", accent:"var(--series-2)"},
     {label:"Orders / Day (avg)", value: Math.round(agg.orders/agg.daily.length).toLocaleString(), accent:"var(--series-3)"},
-    {label:"Peak Sales Hours", value: "No data yet", accent:"var(--series-4)"},
+    {label:"Peak Sales Hours", value: '<span id="peakHoursVal" style="color:var(--text-muted)">Loading…</span>', accent:"var(--series-4)"},
     {label:"Discounts", value: fmtSAR(agg.discount_amt,true), accent:"var(--series-2)"},
     {label:"Refunds", value: fmtSAR(agg.refund_amt,true), accent:"var(--series-5)"},
     {label:"Avg Transaction Value", value: fmtSAR(agg.aov), accent:"var(--series-5)"},
@@ -1326,6 +1346,118 @@ function renderCustomer(agg, branches) {
   grid.innerHTML = items.map(it => `<div class="kpi"><div class="accent" style="background:${it.accent}"></div>
     <div class="label">${it.label}</div><div class="value" style="font-size:19px;">${it.value}</div></div>`).join("");
 }
+
+// ---------------- Render: Peak sales hours (real Loyverse receipts, by Saudi clock hour) ----------------
+const hoursState = { metric: "sales", cache: {}, seq: 0 };
+function hourSpan(h) {
+  const a = h % 12 || 12, b = (h + 1) % 12 || 12;
+  const apA = h < 12 ? "AM" : "PM", apB = (h + 1) % 24 < 12 ? "AM" : "PM";
+  return apA === apB ? `${a}–${b} ${apA}` : `${a} ${apA}–${b} ${apB}`;
+}
+function hourAxis(h) { return (h % 12 || 12) + (h < 12 ? "a" : "p"); }
+function hoursRangeDates() {
+  let dS, dE;
+  if (state.period === "custom") { const r = customDayRange(); if (!r) return null; dS = r[0]; dE = r[1]; }
+  else { const r = dayRangeForMonths(monthIndicesFor(state.period)); dS = r[0]; dE = r[1]; }
+  dE = Math.min(dE, lastDayIdx() + 1);
+  if (dE <= dS) return null;
+  return { from: dateInputValue(dS), to: dateInputValue(dE - 1), days: dE - dS };
+}
+function loadHourly(from, to) {
+  const key = from + "|" + to, hit = hoursState.cache[key];
+  if (hit && Date.now() - hit.t < 5 * 60 * 1000) return hit.p;
+  const p = fetch(`/api/hourly?date_from=${from}&date_to=${to}`, { credentials: "same-origin" })
+    .then(r => { if (!r.ok) throw new Error("GET /api/hourly -> " + r.status); return r.json(); })
+    .catch(e => { delete hoursState.cache[key]; throw e; });
+  hoursState.cache[key] = { t: Date.now(), p };
+  return p;
+}
+function setPeakTile(html, muted) {
+  const el = document.getElementById("peakHoursVal");
+  if (el) { el.innerHTML = html; el.style.color = muted ? "var(--text-muted)" : ""; }
+}
+function hoursMessage(msg) {
+  document.getElementById("hoursChart").innerHTML =
+    `<text class="axis-label" x="660" y="120" text-anchor="middle" style="font-size:13px;">${msg}</text>`;
+}
+function renderHours(branches) {
+  const rng = hoursRangeDates();
+  const sub = document.getElementById("hoursSub"), note = document.getElementById("hoursNote");
+  const metricName = hoursState.metric === "orders" ? "Orders" : "Sales";
+  sub.textContent = `${metricName} by hour of the day · ${branches.length === visibleBranches().length ? "all branches" : branches.map(b => b.name).join(", ")} · ${periodLabel(state.period)}`;
+  if (!rng) { hoursMessage("No data in this period"); note.textContent = ""; setPeakTile("No data yet", true); return; }
+  const seq = ++hoursState.seq;
+  loadHourly(rng.from, rng.to).then(data => {
+    if (seq !== hoursState.seq) return;               // a newer filter change superseded this one
+    drawHours(data, branches, rng);
+  }).catch(() => {
+    if (seq !== hoursState.seq) return;
+    hoursMessage("Hourly data could not be loaded"); note.textContent = ""; setPeakTile("No data yet", true);
+  });
+}
+function drawHours(data, branches, rng) {
+  const svg = document.getElementById("hoursChart"), tt = document.getElementById("ttHours");
+  const note = document.getElementById("hoursNote");
+  const names = new Set(branches.map(b => b.name));
+  const sales = new Array(24).fill(0), orders = new Array(24).fill(0);
+  Object.entries(data.branches || {}).forEach(([n, s]) => {
+    if (!names.has(n)) return;
+    s.sales.forEach((v, i) => { sales[i] += v; });
+    s.orders.forEach((v, i) => { orders[i] += v; });
+  });
+  const cov = data.coverage || { branch_days: 0, with_hours: 0 };
+  const isOrders = hoursState.metric === "orders";
+  const arr = isOrders ? orders : sales, total = sum(arr), totalSales = sum(sales), totalOrders = sum(orders);
+  if (!(total > 0)) {
+    hoursMessage(cov.branch_days && cov.with_hours < cov.branch_days ? "Hourly detail is still being filled in for this period" : "No sales in this period");
+    note.textContent = ""; setPeakTile("No data yet", true); return;
+  }
+  const rank = arr.map((v, h) => [v, h]).filter(x => x[0] > 0).sort((a, b) => b[0] - a[0]);
+  const top = rank.slice(0, 3).map(x => x[1]), topSet = new Set(top);
+  const fmtV = v => isOrders ? Math.round(v).toLocaleString() : fmtSAR(v, true).replace("SAR ", "");
+  const W = 1320, H = 260, padL = 56, padR = 16, padT = 24, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB, slot = plotW / 24, barW = slot - 6;
+  const maxV = Math.max(...arr) * 1.12 || 1;
+  const yScale = v => padT + plotH - (v / maxV) * plotH;
+  let s = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = maxV * i / 4, y = yScale(v);
+    s += `<line class="grid-line" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/>`;
+    s += `<text class="axis-label" x="${padL - 8}" y="${y + 3}" text-anchor="end">${fmtV(v)}</text>`;
+  }
+  s += `<line class="baseline" x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}"/>`;
+  for (let h = 0; h < 24; h++) {
+    const v = Math.max(0, arr[h]), x = padL + slot * h + (slot - barW) / 2, y = yScale(v), hh = padT + plotH - y;
+    const rk = top.indexOf(h);
+    const tip = `${hourSpan(h)}${rk >= 0 ? " · #" + (rk + 1) + " busiest" : ""}<br><span class='t-val'>${isOrders ? Math.round(orders[h]).toLocaleString() + " orders" : fmtSAR(sales[h])}</span>`
+      + `<br>${(arr[h] / total * 100).toFixed(1)}% of ${isOrders ? "orders" : "sales"}`
+      + `<br>${isOrders ? fmtSAR(sales[h]) + " sales" : Math.round(orders[h]).toLocaleString() + " orders"}`;
+    if (v > 0) s += `<rect x="${x}" y="${y}" width="${barW}" height="${hh}" rx="3" fill="var(--series-1)" opacity="${topSet.has(h) ? 1 : 0.32}"/>`;
+    if (topSet.has(h)) s += `<text class="axis-label" x="${x + barW / 2}" y="${y - 6}" text-anchor="middle" style="fill:var(--text-primary);font-weight:650;">${fmtV(v)}</text>`;
+    s += `<text class="axis-label" x="${x + barW / 2}" y="${padT + plotH + 16}" text-anchor="middle">${hourAxis(h)}</text>`;
+    s += `<rect class="pt" data-tip="${tip}" x="${padL + slot * h}" y="${padT}" width="${slot}" height="${plotH}" fill="transparent"/>`;
+  }
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = s;
+  svg.setAttribute("aria-label", `${isOrders ? "Orders" : "Sales"} by hour of the day. Busiest hours: ${top.map(hourSpan).join(", ")}.`);
+  wireTooltip(svg, tt, ".pt");
+  // tile: busiest hour big, the next two small (always ranked by sales, regardless of the chart toggle)
+  const rs = sales.map((v, h) => [v, h]).filter(x => x[0] > 0).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+  setPeakTile(`${hourSpan(rs[0])}<div style="font-size:11px;color:var(--text-muted);font-weight:400;margin-top:2px;">then ${rs.slice(1, 3).map(hourSpan).join(", ")}</div>`, false);
+  const share = rs.slice(0, 3).reduce((a, h) => a + sales[h], 0) / totalSales * 100;
+  let msg = `The 3 busiest hours bring ${share.toFixed(0)}% of sales (${fmtSAR(totalSales, true)} over ${rng.days} day${rng.days === 1 ? "" : "s"}, ${Math.round(totalOrders).toLocaleString()} orders).`;
+  if (cov.branch_days && cov.with_hours < cov.branch_days) {
+    msg += ` Hourly detail is still being filled in for older days — ${Math.round(cov.with_hours / cov.branch_days * 100)}% of the selected days are ready, so the totals above cover only those days.`;
+  }
+  note.textContent = msg;
+}
+document.getElementById("hoursMetric").addEventListener("click", e => {
+  const b = e.target.closest("button[data-m]");
+  if (!b || b.dataset.m === hoursState.metric) return;
+  hoursState.metric = b.dataset.m;
+  document.querySelectorAll("#hoursMetric button").forEach(x => x.classList.toggle("on", x === b));
+  renderHours(selectedBranches());
+});
 
 // ---------------- Render: P&L (real Odoo data) ----------------
 // Odoo posts branch revenue on a lag; only include months where revenue has actually
@@ -1639,6 +1771,7 @@ function render() {
   renderRanking(state.period);
   renderProducts(agg);
   renderCustomer(agg, branches);
+  renderHours(branches);
   renderPnL();
 }
 
