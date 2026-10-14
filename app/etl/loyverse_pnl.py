@@ -58,6 +58,16 @@ def _day(receipt: dict) -> str:
     return (ts + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).strftime("%Y-%m-%d")
 
 
+def _hour(receipt: dict) -> int:
+    """0-23 -- the Saudi (UTC+3) clock hour of receipt_date (same local time _day() uses)."""
+    raw = receipt["receipt_date"]
+    try:
+        ts = datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return 0
+    return (ts + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).hour
+
+
 def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> dict:
     """
     Returns {"branches": {odoo_branch_name: {date: {...}}},
@@ -75,11 +85,14 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
         "discount_amt": float,
         "refund_amt": float,
         "items": {item_name: {"cat": str, "qty": float, "sales": float}},
+        "hours": {"13": {"s": float, "o": int}, ...},   # by Saudi clock hour (sales net of refunds)
       }
     """
     out: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(lambda: {
         "sales": 0.0, "orders": 0, "discount_amt": 0.0, "refund_amt": 0.0,
         "items": defaultdict(lambda: {"cat": "Other", "qty": 0.0, "sales": 0.0}),
+        # Saudi clock hour -> {"s": net sales (VAT-inclusive, refunds subtracted), "o": order count}
+        "hours": defaultdict(lambda: {"s": 0.0, "o": 0}),
     }))
 
     skipped_unknown_store = 0
@@ -101,10 +114,14 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
         is_refund = r.get("receipt_type") == "REFUND"
         amount = r.get("total_money") or 0.0
 
+        hour_bucket = day_bucket["hours"][_hour(r)]
         if is_refund:
+            hour_bucket["s"] -= amount
             day_bucket["sales"] -= amount
             day_bucket["refund_amt"] += amount
         else:
+            hour_bucket["s"] += amount
+            hour_bucket["o"] += 1
             day_bucket["sales"] += amount
             day_bucket["orders"] += 1
             day_bucket["discount_amt"] += r.get("total_discount") or 0.0
@@ -119,7 +136,10 @@ def aggregate_receipts(receipts: list[dict], item_category: dict[str, str]) -> d
     # Convert nested defaultdicts to plain dicts so this is safely JSON-serializable.
     branches = {
         branch: {
-            day: {**vals, "items": dict(vals["items"])}
+            day: {
+                **vals, "items": dict(vals["items"]),
+                "hours": {str(h): {"s": round(v["s"], 2), "o": v["o"]} for h, v in sorted(vals["hours"].items())},
+            }
             for day, vals in days.items()
         }
         for branch, days in out.items()
