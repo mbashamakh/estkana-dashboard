@@ -360,13 +360,13 @@
   <!-- Row 6 -->
   <section>
     <div class="section-title">Outlet performance ranking</div>
-    <div class="section-sub">All branches, ranked by profit contribution</div>
+    <div class="section-sub">All branches, ranked by net profit (Odoo)</div>
     <div class="card">
       <table>
         <thead><tr><th class="rank">#</th><th>Outlet</th><th class="num">Sales</th><th class="num">Food cost</th><th class="num">Profit</th><th>Flags</th></tr></thead>
         <tbody id="rankTable"></tbody>
       </table>
-      <div class="note">Ranked by outlet profit contribution (sales − food cost − labor cost − half of discounts). Flags call out high food cost and sales/profit mismatches.</div>
+      <div class="note" id="rankNote">Profit = outlet gross profit − outlet operating expenses − its revenue share of HO, CPU, other overheads and other income, from Odoo, so the column adds up to the company Net Profit. Flags call out high food cost and sales/profit mismatches.</div>
     </div>
   </section>
 
@@ -935,15 +935,22 @@ function odooNetProfit(branches, monthIndices, dayRange) {
   const labels = requested.filter(l => posted.has(l));
   if (!labels.length) return null;
   const names = new Set(branches.map(b => b.name));
-  const rollRev = sum(PNL.branch_rollup.months.filter(m => labels.includes(m.m)).map(m => m.revenue));
-  let rev = 0, gpLessOpex = 0;
-  PNL.branches.filter(pb => names.has(pb.loyverse_name)).forEach(pb => {
+  // Shares are taken over the outlets that exist on the dashboard (an Odoo cost center with no
+  // Loyverse outlet, e.g. the Bangladesh training center, is absorbed by the outlets), so the
+  // per-outlet figures always add up to the company total.
+  const allNames = new Set(DATA.branches.map(b => b.name));
+  let rev = 0, gpLessOpex = 0, allRev = 0, allGpLessOpex = 0;
+  PNL.branches.filter(pb => allNames.has(pb.loyverse_name)).forEach(pb => {
     const a = pnlAggMonths(pb.months, labels);
-    rev += a.revenue;
-    gpLessOpex += a.gross_profit - a.opex;
+    allRev += a.revenue;
+    allGpLessOpex += a.gross_profit - a.opex;
+    if (names.has(pb.loyverse_name)) {
+      rev += a.revenue;
+      gpLessOpex += a.gross_profit - a.opex;
+    }
   });
   if (!rev) return null;
-  const share = rollRev ? rev / rollRev : 0;
+  const share = allRev ? rev / allRev : 0;
   const ho = -pnlAggMonths(PNL.ho.months, labels).net_profit;
   const cpu = -pnlAggMonths(PNL.cpu.months, labels).net_profit;
   // Everything in Odoo's ledger that is not on an outlet / HO / CPU analytic account
@@ -951,8 +958,7 @@ function odooNetProfit(branches, monthIndices, dayRange) {
   // so that selecting all branches ties exactly to Odoo's own Net Profit.
   let extra = 0;
   if (PNL.gl_company && labels.every(l => PNL.gl_company.months.some(m => m.m === l))) {
-    const roll = pnlAggMonths(PNL.branch_rollup.months, labels);
-    const outletsNet = roll.gross_profit - roll.opex - ho - cpu;
+    const outletsNet = allGpLessOpex - ho - cpu;
     extra = (pnlAggMonths(PNL.gl_company.months, labels).net_profit - outletsNet) * share;
   }
   return { net: gpLessOpex - (ho + cpu) * share + extra, months: labels.length, requested: requested.length };
@@ -1205,8 +1211,16 @@ function renderRanking(period) {
   const branches = visibleBranches();
   const monthIndices = monthIndicesFor(period);
   const customRange = customDayRange();
-  const scored = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices, customRange) }));
-  const ranked = [...scored].sort((a,c)=>c.agg.contribution-a.agg.contribution);
+  const scored = branches.map(b => ({ b, agg: branchMonthlyAgg(b, monthIndices, customRange), net: odooNetProfit([b], monthIndices, customRange) }));
+  // Profit = Odoo net profit per outlet (ties to the company Net Profit). Only if Odoo has no
+  // posted month for the period at all do we fall back to the old sample-based contribution.
+  const useOdoo = scored.some(x => x.net);
+  const profitOf = x => useOdoo ? (x.net ? x.net.net : -Infinity) : x.agg.contribution;
+  const ranked = [...scored].sort((a,c)=>profitOf(c)-profitOf(a));
+  const partialOdoo = useOdoo && scored.some(x => x.net && x.net.months < x.net.requested);
+  document.getElementById("rankNote").textContent = useOdoo
+    ? "Profit = outlet gross profit − outlet operating expenses − its revenue share of HO, CPU, other overheads and other income, from Odoo, so the column adds up to the company Net Profit." + (partialOdoo ? " Profit covers only the months already posted in Odoo (†)." : "") + " Flags call out high food cost and sales/profit mismatches."
+    : "No Odoo months posted for this period yet — profit shown is the estimate (sales − food cost − labor cost − half of discounts). Flags call out high food cost and sales/profit mismatches.";
   // Period-weighted, real-Odoo-where-posted food cost % (agg.food_cost_pct
   // from branchMonthlyAgg) — not the flat all-time branch scalar, which
   // ignored both the selected period and any real Odoo data.
@@ -1215,7 +1229,7 @@ function renderRanking(period) {
   const salesRankOf = id => salesRanked.findIndex(x=>x.b.id===id);
 
   const tbody = document.getElementById("rankTable");
-  tbody.innerHTML = ranked.map(({b,agg},i) => {
+  tbody.innerHTML = ranked.map(({b,agg,net},i) => {
     const rank = i+1;
     const flags = [];
     if (rank === 1) flags.push(`<span class="flag good">★ Top performer</span>`);
@@ -1231,7 +1245,7 @@ function renderRanking(period) {
       <td>${b.name}<div style="font-size:10.5px;color:var(--text-muted)">${b.region}</div></td>
       <td class="num">${fmtSAR(agg.sales,true)}</td>
       <td class="num" style="color:${fcColor};">${pct(agg.food_cost_pct)}</td>
-      <td class="num" style="font-weight:650;">${fmtSAR(agg.contribution,true)}</td>
+      <td class="num" style="font-weight:650;${useOdoo && net && net.net<0 ? 'color:var(--critical)' : ''}">${useOdoo ? (net ? fmtSAR(net.net,true) + (net.months < net.requested ? " †" : "") : "—") : fmtSAR(agg.contribution,true)}</td>
       <td>${flags.join("") || "—"}</td>
     </tr>`;
   }).join("");
