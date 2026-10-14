@@ -56,6 +56,12 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         .order_by(AnalyticMonthly.month)
     ).all()
 
+    # Staff cost per outlet and month (GL 611xxxxx + 612xxxxx), kind "labor".
+    labor_map = {
+        (r.name, r.month): r.opex
+        for r in db.scalars(select(AnalyticMonthly).where(AnalyticMonthly.kind == "labor")).all()
+    }
+
     branches_by_name: dict[str, list[AnalyticMonthly]] = {}
     for row in branch_rows:
         branches_by_name.setdefault(row.name, []).append(row)
@@ -64,6 +70,9 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
     branch_rollup_months: dict[str, dict] = {}
     for name, rows in sorted(branches_by_name.items()):
         months = [_month_row_from_db(r) for r in rows]
+        if labor_map:
+            for mrow in months:
+                mrow["labor"] = labor_map.get((name, mrow["m"]), 0.0)
         branches.append({
             "code": "—",  # not modeled in AnalyticMonthly — see note in db/models.py
             "odoo_name": name,
@@ -161,6 +170,7 @@ def get_pnl(db: Session = Depends(get_db), _user=Depends(get_current_user)):
         "branch_rollup": {"months": rollup_months, "ytd": ytd_from_months(rollup_months)},
         "company_total": gl_company or {"months": company_months, "ytd": ytd_from_months(company_months)},
         "gl_company": gl_company,
+        "labor_available": bool(labor_map),
         "overhead": {"months": overhead_months},
         "ho": {"months": ho_months, "cost_center": "[HO] HO"},
         "cpu": {"months": cpu_months, "cost_center": "[CPU] CPU"},
