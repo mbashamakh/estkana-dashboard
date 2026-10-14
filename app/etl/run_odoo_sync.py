@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db.models import AnalyticMonthly, SyncLog
-from app.etl.odoo_pnl import build_gl_company, build_pnl, valid_month_labels
+from app.etl.odoo_pnl import build_gl_company, build_labor, build_pnl, valid_month_labels
 
 
 def _upsert_analytic_monthly(db: Session, kind: str, name: str, month_row: dict, is_complete: bool) -> None:
@@ -62,8 +62,18 @@ def _try_fetch_gl_company() -> list[dict] | None:
         return None
 
 
+def _try_fetch_labor() -> list[dict] | None:
+    """Best-effort staff-cost pull; a failure here must never break the main sync."""
+    try:
+        from app.config import get_settings
+        from app.etl import odoo_client
+        return odoo_client.fetch_labor(get_settings())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict],
-              gl: list[dict] | None = None) -> dict:
+              gl: list[dict] | None = None, labor: list[dict] | None = None) -> dict:
     """
     Given already-fetched raw Odoo records, aggregate and persist them.
     Split out from the live fetch so this half can be exercised in tests
@@ -109,6 +119,17 @@ def sync_odoo(db: Session, rev: list[dict], cogs: list[dict], opex: list[dict],
             _upsert_analytic_monthly(
                 db, kind="gl_other", name="ALL",
                 month_row={"m": row["m"], "revenue": row["other_income"], "cogs": row["other_expense"], "opex": 0.0},
+                is_complete=True,
+            )
+
+        # Staff cost per outlet (GL 611xxxxx + 612xxxxx) -> Labor Cost %.
+        if labor is None:
+            labor = _try_fetch_labor()
+        labor_rows = build_labor(labor) if labor else []
+        for row in labor_rows:
+            _upsert_analytic_monthly(
+                db, kind="labor", name=row["name"],
+                month_row={"m": row["m"], "revenue": 0.0, "cogs": 0.0, "opex": row["labor"]},
                 is_complete=True,
             )
 
