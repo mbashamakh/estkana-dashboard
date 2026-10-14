@@ -1167,9 +1167,9 @@ function renderCostGrid(agg) {
     grid.appendChild(d);
   });
   grid.innerHTML += `<div class="mini-stat" style="grid-column:1/-1; border-top:1px solid var(--border); padding-top:10px; margin-top:2px;">
-    <div class="mlabel">Outlet Profit / Contribution</div><div class="mvalue">${fmtSAR(agg.contribution,true)}</div>
-    <div class="msub">Sales after actual cost, labor cost, and half of discounts</div>
-    <div class="source-tag">via ${contributionSourceTag(agg.food_cost_real_frac)}</div></div>`;
+    <div class="mlabel">${agg.odoo_net ? "Net Profit (Odoo)" : "Outlet Profit / Contribution"}</div><div class="mvalue">${fmtSAR(agg.odoo_net ? agg.odoo_net.net : agg.contribution,true)}</div>
+    <div class="msub">${agg.odoo_net ? "Gross profit − operating expenses − share of HO, CPU, other overheads and other income" : "Sales after actual cost, labor cost, and half of discounts"}</div>
+    <div class="source-tag">via ${agg.odoo_net ? "Odoo (real)" + (agg.prorated ? " — prorated by days" : "") : contributionSourceTag(agg.food_cost_real_frac)}</div></div>`;
   renderCostGaps();
 }
 
