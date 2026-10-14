@@ -339,3 +339,26 @@ def build_gl_company(groups: Iterable[dict]) -> list[dict]:
             r[k] = _round(r[k])
         rows.append(r)
     return rows
+
+
+def build_labor(records: Iterable[dict], dormant: set[str] | None = None) -> list[dict]:
+    """
+    Staff cost per outlet per month: analytic lines on GL accounts starting
+    611 or 612 (salaries, third-party employment, staff meals, Gosi, visas,
+    medical insurance, leave tickets...). records use the same {"a","n","m","v"}
+    shape as the revenue/COGS/opex pulls (Odoo stores expenses negative).
+    Overhead cost centers and dormant branches are excluded, like build_pnl.
+    Returns [{"name": odoo_name, "m": "September 2026", "labor": <positive>}].
+    """
+    dormant = DORMANT_NAMES if dormant is None else dormant
+    idx, _ = _build_index(records, sign=-1)
+    month_order = derive_month_order(records)
+    out = []
+    for name in sorted(idx):
+        if name in OVERHEAD or name in dormant:
+            continue
+        for m in month_order:
+            v = idx[name].get(m, 0)
+            if v:
+                out.append({"name": name, "m": m, "labor": _round(v)})
+    return out
