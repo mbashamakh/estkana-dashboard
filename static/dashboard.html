@@ -913,12 +913,21 @@ function contributionSourceTag(frac) {
 
 // Labor cost % = staff costs (Odoo GL accounts 611xxxxx + 612xxxxx) / Odoo revenue, over the
 // months of the period that Odoo has posted, for the selected outlets. null = no data.
+let LABOR_CARRIED_FROM = null;
 function laborPctFor(branches, monthIndices) {
   if (!PNL || !PNL.labor_available) return null;
   const names = new Set(branches.map(b => b.name));
   const req = monthIndices.map(i => String(MONTH_NAMES[i-1]).replace(/\s*\(.*$/, ""));
   const posted = new Set(PNL.branch_rollup.months.filter(m => m.revenue > 0).map(m => m.m));
-  const labels = new Set(req.filter(l => posted.has(l)));
+  let labels = new Set(req.filter(l => posted.has(l)));
+  // Odoo has not posted the selected (current) month yet: carry the latest posted month's ratio.
+  LABOR_CARRIED_FROM = null;
+  if (!labels.size) {
+    const pm = PNL.branch_rollup.months.filter(m => m.revenue > 0);
+    if (!pm.length) return null;
+    LABOR_CARRIED_FROM = pm[pm.length-1].m;
+    labels = new Set([LABOR_CARRIED_FROM]);
+  }
   let labor = 0, rev = 0;
   PNL.branches.filter(pb => names.has(pb.loyverse_name)).forEach(pb => pb.months.forEach(m => {
     if (labels.has(m.m)) { labor += (m.labor || 0); rev += m.revenue; }
@@ -1169,7 +1178,7 @@ function renderCostGrid(agg) {
   const items = [
     {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"recipe cost sheet (Respie.xlsx), ex-VAT"},
     {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:costSource},
-    {label:"Labor Cost %", value: lcNull ? "No data yet" : pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20% · staff costs ÷ revenue", source: lcNull ? "Odoo — no staff-cost months posted for this period" : "Odoo (real) — GL accounts 611xxxxx + 612xxxxx"},
+    {label:"Labor Cost %", value: lcNull ? "No data yet" : pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20% · staff costs ÷ revenue", source: lcNull ? "Odoo — no staff-cost months posted for this period" : (LABOR_CARRIED_FROM ? "Odoo (real) — GL 611/612, " + LABOR_CARRIED_FROM + " ratio (this month is not posted in Odoo yet)" : "Odoo (real) — GL accounts 611xxxxx + 612xxxxx")},
     {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:costSource},
     {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:costSource},
   ];
