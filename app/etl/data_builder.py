@@ -454,7 +454,7 @@ def build_data_response(db: Session) -> dict:
             "month_ranges": month_ranges,
             "daily_start_last_year": sample["meta"]["daily_start_last_year"],
             # items sold with no recipe cost on Respie.xlsx (year to date, ex-VAT)
-            "uncosted_items": uncosted[:30],
+            "uncosted_items": uncosted[:500],
             "uncosted_count": len(uncosted),
             "uncosted_sales": round(uncosted_sales),
             "uncosted_sales_pct": round(uncosted_sales / real_sales_total * 100, 2) if real_sales_total else 0.0,
