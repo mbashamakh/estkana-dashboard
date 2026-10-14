@@ -488,7 +488,7 @@
   </section>
 
   <footer>
-    Sales, orders, AOV, discounts, refunds, category mix and top products are live from Loyverse (updated hourly; 2026 history backfills gradually — see the sync note above the filters). P&amp;L figures are live from Odoo. Labor cost %, food/standard cost %, waste, inventory variance, and customer rating aren't tracked in Odoo or Loyverse, so those stay as sample/placeholder values (marked "sample") until we agree on a source — a labor/POS integration or manual entry. Customer Rating remains a permanent manual field. Filters recompute every card and chart from the same underlying dataset.
+    Sales, orders, AOV, discounts, refunds, category mix and top products are live from Loyverse (updated hourly; 2026 history backfills gradually — see the sync note above the filters). P&amp;L figures are live from Odoo. Labor cost % (Odoo staff-cost accounts 611/612) and actual cost % are live from Odoo; standard cost % comes from the recipe sheet. Customer rating, complaints, waste and peak hours have no data source yet and show "No data yet" instead of placeholder numbers. Filters recompute every card and chart from the same underlying dataset.
   </footer>
 
 </div>
@@ -754,7 +754,7 @@ function computeAgg(branches, period) {
   const food_cost_real_sales = sum(perBranch.map(x => x.agg.real_cost_sales));
   const food_cost_real_frac = sales ? food_cost_real_sales/sales : 0;
   const standard_cost_pct = wavgKey("standard_cost_pct");
-  const labor_cost_pct = wavgKey("labor_cost_pct");
+  const labor_cost_pct = laborPctFor(branches, monthIndices);   // real (Odoo), or null
   const waste_pct = wavgKey("waste_pct");
   const discount_pct = wavgKey("discount_pct");
   const refund_pct = wavgKey("refund_pct");
@@ -909,6 +909,21 @@ function contributionSourceTag(frac) {
   return frac > 0.001
     ? "Odoo actual cost" + (frac >= 0.999 ? "" : " (partial)") + " + sample labor %"
     : "Odoo (sample — see P&L section for real data)";
+}
+
+// Labor cost % = staff costs (Odoo GL accounts 611xxxxx + 612xxxxx) / Odoo revenue, over the
+// months of the period that Odoo has posted, for the selected outlets. null = no data.
+function laborPctFor(branches, monthIndices) {
+  if (!PNL || !PNL.labor_available) return null;
+  const names = new Set(branches.map(b => b.name));
+  const req = monthIndices.map(i => String(MONTH_NAMES[i-1]).replace(/\s*\(.*$/, ""));
+  const posted = new Set(PNL.branch_rollup.months.filter(m => m.revenue > 0).map(m => m.m));
+  const labels = new Set(req.filter(l => posted.has(l)));
+  let labor = 0, rev = 0;
+  PNL.branches.filter(pb => names.has(pb.loyverse_name)).forEach(pb => pb.months.forEach(m => {
+    if (labels.has(m.m)) { labor += (m.labor || 0); rev += m.revenue; }
+  }));
+  return rev ? labor / rev * 100 : null;
 }
 
 // Net profit exactly as the P&L section / Odoo shows it: gross profit - operating
@@ -1148,12 +1163,13 @@ function renderCostGrid(agg) {
   const grid = document.getElementById("costGrid");
   const variance = agg.food_cost_pct - agg.standard_cost_pct;
   const fc = statusOf(agg.food_cost_pct, agg.standard_cost_pct, "lte", 1.5);
-  const lc = statusOf(agg.labor_cost_pct, 20, "lte", 2);
+  const lcNull = agg.labor_cost_pct === null || agg.labor_cost_pct === undefined;
+  const lc = lcNull ? null : statusOf(agg.labor_cost_pct, 20, "lte", 2);
   const costSource = costSourceTag(agg.food_cost_real_frac);
   const items = [
     {label:"Standard Cost %", value: pct(agg.standard_cost_pct), sub:"target recipe cost", source:"recipe cost sheet (Respie.xlsx), ex-VAT"},
     {label:"Actual Cost %", value: pct(agg.food_cost_pct), status: fc, sub:`${variance>=0?'+':''}${variance.toFixed(1)} pts vs. standard`, source:costSource},
-    {label:"Labor Cost %", value: pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20%", source:"Sample — no Odoo labor/payroll account mapped yet"},
+    {label:"Labor Cost %", value: lcNull ? "No data yet" : pct(agg.labor_cost_pct), status: lc, sub:"target ≤ 20% · staff costs ÷ revenue", source: lcNull ? "Odoo — no staff-cost months posted for this period" : "Odoo (real) — GL accounts 611xxxxx + 612xxxxx"},
     {label:"Gross Profit", value: fmtSAR(agg.gross_profit, true), sub:"sales − actual cost", source:costSource},
     {label:"Gross Margin %", value: pct(agg.gross_margin_pct), sub:"100% − actual cost %", source:costSource},
   ];
@@ -1195,12 +1211,16 @@ function renderTraffic(agg) {
     {kpi:"Labor Cost", actual: agg.labor_cost_pct, target: 20, dir:"lte", warn:2, fmt:pct},
     {kpi:"Discounts", actual: agg.discount_pct, target: 3, dir:"lte", warn:1.5, fmt:pct},
     {kpi:"Inventory Variance", actual: agg.inv_variance_pct, target: 1, dir:"lte", warn:0.3, fmt:pct},
-    {kpi:"Customer Rating", actual: agg.rating, target: 4.5, dir:"gte", warn:0.2, fmt:(v)=>v.toFixed(1)},
+    {kpi:"Customer Rating", actual: null, target: 4.5, dir:"gte", warn:0.2, fmt:(v)=>v.toFixed(1)},
   ];
   const tbody = document.getElementById("trafficTable");
   tbody.innerHTML = rows.map(r => {
-    const st = statusOf(r.actual, r.target, r.dir, r.warn);
     const targetStr = r.dir==="lte" ? "≤ "+r.fmt(r.target) : "≥ "+r.fmt(r.target);
+    if (r.actual === null || r.actual === undefined) {
+      return `<tr><td>${r.kpi}</td><td class="num" style="color:var(--text-muted)">No data yet</td><td class="num">${targetStr}</td>
+      <td class="status-cell"><span style="color:var(--text-muted)">—</span></td></tr>`;
+    }
+    const st = statusOf(r.actual, r.target, r.dir, r.warn);
     return `<tr><td>${r.kpi}</td><td class="num">${r.fmt(r.actual)}</td><td class="num">${targetStr}</td>
       <td class="status-cell"><span class="traffic-pill ${st}">${statusLabel(st)}</span></td></tr>`;
   }).join("");
@@ -1286,10 +1306,10 @@ function renderCustomer(agg, branches) {
   const grid = document.getElementById("custGrid");
   const peak = branches[0] ? branches[0].peak_hours : "—";
   const items = [
-    {label:"Customer Rating", value: agg.rating.toFixed(1)+" / 5", accent:"var(--series-1)"},
-    {label:"Complaints", value: agg.complaints, accent:"var(--series-2)"},
+    {label:"Customer Rating", value: "No data yet", accent:"var(--series-1)"},
+    {label:"Complaints", value: "No data yet", accent:"var(--series-2)"},
     {label:"Orders / Day (avg)", value: Math.round(agg.orders/agg.daily.length).toLocaleString(), accent:"var(--series-3)"},
-    {label:"Peak Sales Hours", value: peak, accent:"var(--series-4)"},
+    {label:"Peak Sales Hours", value: "No data yet", accent:"var(--series-4)"},
     {label:"Discounts", value: fmtSAR(agg.discount_amt,true), accent:"var(--series-2)"},
     {label:"Refunds", value: fmtSAR(agg.refund_amt,true), accent:"var(--series-5)"},
     {label:"Avg Transaction Value", value: fmtSAR(agg.aov), accent:"var(--series-5)"},
