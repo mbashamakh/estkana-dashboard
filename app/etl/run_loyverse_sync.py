@@ -37,6 +37,9 @@ from app.etl import loyverse_client
 from app.etl.loyverse_pnl import LOCAL_UTC_OFFSET_HOURS, aggregate_receipts, build_item_category_lookup
 
 BACKFILL_CHUNK_DAYS = 5
+# Days per run whose rows still lack per-hour data (stored before LoyverseDaily.hours existed)
+# that get re-pulled -- see _backfill_missing_hours().
+HOURS_BACKFILL_CHUNK_DAYS = 4
 
 # Arbitrary fixed key for a Postgres session-level advisory lock -- see
 # _try_acquire_sync_lock()'s docstring for why this exists.
@@ -195,6 +198,30 @@ def _advance_backfill_cursor(db: Session, date_label: str) -> None:
     db.execute(stmt)
 
 
+def _backfill_missing_hours(db: Session, settings: Settings, now: datetime) -> tuple[list[str], int]:
+    """Re-pull up to HOURS_BACKFILL_CHUNK_DAYS current-year days whose rows have no
+    per-hour data yet (NULL `hours`, i.e. stored before that column existed), newest
+    first. Today and yesterday are skipped: the incremental step above re-pulls them
+    every run anyway. After a day is re-pulled, any of its rows still NULL (a branch
+    whose receipts have since vanished, say) are marked {} so the same day is never
+    retried forever. Self-healing: once every day has hours this finds nothing."""
+    year_start = now.replace(month=1, day=1).strftime("%Y-%m-%d")
+    cutoff = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+    dates = db.scalars(
+        select(LoyverseDaily.date)
+        .where(LoyverseDaily.hours.is_(None), LoyverseDaily.date >= year_start, LoyverseDaily.date <= cutoff)
+        .distinct().order_by(LoyverseDaily.date.desc()).limit(HOURS_BACKFILL_CHUNK_DAYS)
+    ).all()
+    done: list[str] = []
+    receipts = 0
+    for d in dates:
+        receipts += _pull_and_upsert_full_day(db, settings, datetime.strptime(d, "%Y-%m-%d"))
+        db.execute(text("UPDATE loyverse_daily SET hours = '{}'::json WHERE date = :d AND hours IS NULL"), {"d": d})
+        db.commit()
+        done.append(d)
+    return done, receipts
+
+
 def _try_acquire_sync_lock(db: Session) -> bool:
     """
     Postgres session-level advisory lock so two sync_loyverse() runs can
@@ -318,7 +345,17 @@ def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
         db.rollback()
         backfill_error = str(exc)[:1000]
 
-    success = incremental_error is None and backfill_error is None
+    # 3. Fill in per-hour data for days stored before it existed (a few days per run).
+    hours_done: list[str] = []
+    hours_receipts = 0
+    hours_error = None
+    try:
+        hours_done, hours_receipts = _backfill_missing_hours(db, settings, now)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        hours_error = str(exc)[:1000]
+
+    success = incremental_error is None and backfill_error is None and hours_error is None
     message = (
         f"incremental={incremental_count} receipts"
         + (f" (FAILED: {incremental_error})" if incremental_error else "")
@@ -326,6 +363,8 @@ def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
         + (f"[{backfilled_dates[0]}..{backfilled_dates[-1]}]" if backfilled_dates else "(none — target reached or nothing to do)")
         + f", {backfill_receipts_total} receipts"
         + (f" (FAILED: {backfill_error})" if backfill_error else "")
+        + (f"; hourly detail filled for {len(hours_done)} day(s) [{hours_done[-1]}..{hours_done[0]}], {hours_receipts} receipts" if hours_done else "")
+        + (f" (FAILED: {hours_error})" if hours_error else "")
     )
     db.add(SyncLog(
         source="loyverse", success=success, message=message[:2000],
@@ -340,6 +379,8 @@ def _sync_loyverse_locked(db: Session, settings: Settings) -> dict:
         "backfilled_dates": backfilled_dates,
         "backfill_receipts": backfill_receipts_total,
         "backfill_error": backfill_error,
+        "hours_backfilled_dates": hours_done,
+        "hours_error": hours_error,
     }
     if not success:
         # run_loyverse_once.py (the cron entrypoint) expects an exception on
