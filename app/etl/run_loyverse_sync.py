@@ -39,7 +39,7 @@ from app.etl.loyverse_pnl import LOCAL_UTC_OFFSET_HOURS, aggregate_receipts, bui
 BACKFILL_CHUNK_DAYS = 5
 # Days per run whose rows still lack per-hour data (stored before LoyverseDaily.hours existed)
 # that get re-pulled -- see _backfill_missing_hours().
-HOURS_BACKFILL_CHUNK_DAYS = 4
+HOURS_BACKFILL_CHUNK_DAYS = 8
 
 # Arbitrary fixed key for a Postgres session-level advisory lock -- see
 # _try_acquire_sync_lock()'s docstring for why this exists.
